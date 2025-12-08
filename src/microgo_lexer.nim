@@ -1,8 +1,10 @@
 # microgo_lexer.nim 
 import std/[strutils, tables]
 
+# =========================== TOKEN DEFINITIONS ============================
 type
   TokenKind* = enum
+    # Keywords
     tkFor = "for"
     tkFunc = "func"
     tkIf = "if"
@@ -46,8 +48,8 @@ type
     line*, col*: int
     case isLiteral*: bool
     of true:
-      strVal*: string
-      numVal*: float
+      strVal*: string # For string literals
+      numVal*: float # For numeric literals
     else:
       discard
 
@@ -66,6 +68,162 @@ const Keywords = {
   "print": tkPrint,
 }.toTable
 
+# =========================== HELPER FUNCTIONS ============================
+proc createToken(
+    kind: TokenKind,
+    lexeme: string,
+    line, col: int,
+    isLiteral: bool = false,
+    strVal: string = "",
+    numVal: float = 0.0,
+): Token =
+  if isLiteral:
+    Token(
+      kind: kind,
+      lexeme: lexeme,
+      line: line,
+      col: col,
+      isLiteral: true,
+      strVal: strVal,
+      numVal: numVal,
+    )
+  else:
+    Token(kind: kind, lexeme: lexeme, line: line, col: col, isLiteral: false)
+
+# =========================== LEXER FUNCTIONS ============================
+proc scanIdentifier(source: string, i: var int, line, col: var int): Token =
+  let start = i
+  while i < source.len and source[i] in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_'}:
+    inc(i)
+    inc(col)
+
+  let lexeme = source[start ..< i]
+  let kind = Keywords.getOrDefault(lexeme, tkIdent)
+  let tokenCol = col - lexeme.len
+
+  createToken(kind, lexeme, line, tokenCol)
+
+proc scanNumber(source: string, i: var int, line, col: var int): Token =
+  let start = i
+  var isFloat = false
+
+  # Integer part
+  while i < source.len and source[i] in {'0' .. '9'}:
+    inc(i)
+    inc(col)
+
+  # Decimal point?
+  if i < source.len and source[i] == '.' and i + 1 < source.len and
+      source[i + 1] in {'0' .. '9'}:
+    isFloat = true
+    inc(i) # Skip '.'
+    inc(col)
+    while i < source.len and source[i] in {'0' .. '9'}:
+      inc(i)
+      inc(col)
+
+  # Optional exponent
+  if i < source.len and source[i] in {'e', 'E'}:
+    isFloat = true
+    inc(i) # Skip 'e'
+    inc(col)
+    if i < source.len and source[i] in {'+', '-'}:
+      inc(i)
+      inc(col)
+    while i < source.len and source[i] in {'0' .. '9'}:
+      inc(i)
+      inc(col)
+
+  let lexeme = source[start ..< i]
+  let numVal = parseFloat(lexeme)
+  let tokenCol = col - lexeme.len
+  let kind = if isFloat: tkFloatLit else: tkIntLit
+
+  createToken(kind, lexeme, line, tokenCol, true, "", numVal)
+
+proc scanString(source: string, i: var int, line, col: var int): Token =
+  let start = i
+  inc(i) # Skip opening quote
+  inc(col)
+
+  var strVal = ""
+  while i < source.len and source[i] != '"':
+    if source[i] == '\\':
+      inc(i)
+      inc(col)
+      if i < source.len:
+        case source[i]
+        of 'n':
+          strVal.add('\n')
+        of 't':
+          strVal.add('\t')
+        of 'r':
+          strVal.add('\r')
+        of '"':
+          strVal.add('"')
+        of '\\':
+          strVal.add('\\')
+        else:
+          strVal.add('\\') # Unknown escape, keep backslash
+      inc(i)
+      inc(col)
+    else:
+      strVal.add(source[i])
+      inc(i)
+      inc(col)
+
+  if i < source.len and source[i] == '"':
+    inc(i) # Skip closing quote
+    inc(col)
+    let lexeme = source[start ..< i]
+    let tokenCol = col - lexeme.len
+    createToken(tkStringLit, lexeme, line, tokenCol, true, strVal)
+  else:
+    createToken(tkError, "Unterminated string", line, col)
+
+proc scanCBlock(source: string, i: var int, line, col: var int): Token =
+  # Skip @c
+  inc(i) # Skip @
+  inc(col)
+  inc(i) # Skip c
+  inc(col)
+
+  # Skip optional whitespace
+  while i < source.len and source[i] in {' ', '\t'}:
+    inc(i)
+    inc(col)
+
+  # Expect {
+  if i >= source.len or source[i] != '{':
+    return createToken(tkError, "Expected '{' after @c", line, col)
+
+  # Skip the {
+  inc(i)
+  inc(col)
+
+  # Capture everything until matching }
+  var cCode = ""
+  var braceCount = 1 # We're inside the first {
+  let startCol = col
+
+  while i < source.len and braceCount > 0:
+    case source[i]
+    of '{':
+      inc(braceCount)
+      cCode.add(source[i])
+    of '}':
+      dec(braceCount)
+      if braceCount > 0:
+        cCode.add(source[i])
+    else:
+      cCode.add(source[i])
+
+    inc(i)
+    inc(col)
+
+  createToken(tkCBlock, cCode, line, startCol)
+
+# =========================== MAIN LEXER ============================
 proc lex*(source: string): seq[Token] =
   var
     tokens: seq[Token]
@@ -73,305 +231,100 @@ proc lex*(source: string): seq[Token] =
     line = 1
     col = 1
 
-  let n = source.len
-
-  proc peek(offset: int = 0): char =
-    if i + offset < n:
-      source[i + offset]
-    else:
-      '\0'
-
-  proc advance() =
-    inc(i)
-    inc(col)
-
-  while i < n:
-    let ch = peek()
+  while i < source.len:
+    let ch = source[i]
 
     case ch
-    # whitespace 
+    of 'a' .. 'z', 'A' .. 'Z', '_':
+      tokens.add(scanIdentifier(source, i, line, col))
+    of '0' .. '9':
+      tokens.add(scanNumber(source, i, line, col))
+    of '"':
+      tokens.add(scanString(source, i, line, col))
+    of '@':
+      if i + 1 < source.len and source[i + 1] == 'c':
+        tokens.add(scanCBlock(source, i, line, col))
+      else:
+        tokens.add(
+          createToken(
+            tkError,
+            "Unexpected character after @: " &
+              (if i + 1 < source.len: $source[i + 1] else: "EOF"),
+            line,
+            col,
+          )
+        )
+        inc(i)
+        inc(col)
+    of '=':
+      tokens.add(createToken(tkAssign, "=", line, col))
+      inc(i)
+      inc(col)
+    of '+':
+      tokens.add(createToken(tkPlus, "+", line, col))
+      inc(i)
+      inc(col)
+    of ':':
+      tokens.add(createToken(tkColon, ":", line, col))
+      inc(i)
+      inc(col)
+    of ',':
+      tokens.add(createToken(tkComma, ",", line, col))
+      inc(i)
+      inc(col)
+    of '.':
+      tokens.add(createToken(tkDot, ".", line, col))
+      inc(i)
+      inc(col)
+    of ';':
+      tokens.add(createToken(tkSemicolon, ";", line, col))
+      inc(i)
+      inc(col)
+    of '(':
+      tokens.add(createToken(tkLParen, "(", line, col))
+      inc(i)
+      inc(col)
+    of ')':
+      tokens.add(createToken(tkRParen, ")", line, col))
+      inc(i)
+      inc(col)
+    of '{':
+      tokens.add(createToken(tkLBrace, "{", line, col))
+      inc(i)
+      inc(col)
+    of '}':
+      tokens.add(createToken(tkRBrace, "}", line, col))
+      inc(i)
+      inc(col)
+    of '/':
+      if i + 1 < source.len and source[i + 1] == '/':
+        # Line comment
+        while i < source.len and source[i] != '\n':
+          inc(i)
+          inc(col)
+      else:
+        tokens.add(createToken(tkError, "Unexpected character: " & ch, line, col))
+        inc(i)
+        inc(col)
     of ' ', '\t':
-      advance()
+      inc(i)
+      inc(col)
     of '\n':
       inc(line)
       col = 1
-      advance()
-
-    # ============ IDENTIFIERS & KEYWORDS ============
-    of 'a' .. 'z', 'A' .. 'Z', '_':
-      var start = i
-      while i < n and peek() in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_'}:
-        advance()
-      let lexeme = source[start ..< i]
-
-      let kind =
-        if lexeme in Keywords:
-          Keywords[lexeme]
-        else:
-          tkIdent
-      tokens.add(
-        Token(
-          kind: kind,
-          lexeme: lexeme,
-          line: line,
-          col: col - lexeme.len,
-          isLiteral: false,
-        )
-      )
-
-    # ============ NUMBERS ============
-    of '0' .. '9':
-      var
-        start = i
-        isFloat = false
-
-      # Integer part
-      while i < n and peek() in {'0' .. '9'}:
-        advance()
-
-      # Decimal point?
-      if peek() == '.' and peek(1) in {'0' .. '9'}:
-        isFloat = true
-        advance() # Skip '.'
-        while i < n and peek() in {'0' .. '9'}:
-          advance()
-
-      # Optional exponent
-      if peek() in {'e', 'E'}:
-        isFloat = true
-        advance() # Skip 'e'
-        if peek() in {'+', '-'}:
-          advance()
-        while i < n and peek() in {'0' .. '9'}:
-          advance()
-
-      let
-        lexeme = source[start ..< i]
-        numVal = parseFloat(lexeme)
-
-      tokens.add(
-        Token(
-          kind: if isFloat: tkFloatLit else: tkIntLit,
-          lexeme: lexeme,
-          line: line,
-          col: col - lexeme.len,
-          isLiteral: true,
-          numVal: numVal,
-        )
-      )
-
-    # ============ STRINGS ============
-    of '"':
-      var start = i
-      advance() # Skip opening quote
-
-      var strVal = ""
-      while i < n and peek() != '"':
-        if peek() == '\\':
-          advance()
-          case peek()
-          of 'n':
-            strVal.add('\n')
-            advance()
-          of 't':
-            strVal.add('\t')
-            advance()
-          of 'r':
-            strVal.add('\r')
-            advance()
-          of '"':
-            strVal.add('"')
-            advance()
-          of '\\':
-            strVal.add('\\')
-            advance()
-          else:
-            strVal.add('\\') # Unknown escape, keep backslash
-        else:
-          strVal.add(peek())
-          advance()
-
-      if peek() == '"':
-        advance() # Skip closing quote
-        let lexeme = source[start ..< i]
-        tokens.add(
-          Token(
-            kind: tkStringLit,
-            lexeme: lexeme,
-            line: line,
-            col: col - lexeme.len,
-            isLiteral: true,
-            strVal: strVal,
-          )
-        )
-      else:
-        tokens.add(
-          Token(
-            kind: tkError,
-            lexeme: "Unterminated string",
-            line: line,
-            col: col,
-            isLiteral: false,
-          )
-        )
-
-    # ============ C BLOCKS (@c { ... }) ============
-    of '@':
-      if peek(1) == 'c':
-        # Skip @c
-        advance() # Skip @
-        advance() # Skip c
-
-        # Skip optional whitespace
-        while peek() in {' ', '\t'}:
-          advance()
-
-        # Expect {
-        if peek() != '{':
-          tokens.add(
-            Token(kind: tkError, lexeme: "Expected '{' after @c", line: line, col: col)
-          )
-          advance()
-          continue
-
-        # Skip the {
-        advance()
-
-        # Now capture everything until matching }
-        var
-          cCode = ""
-          braceCount = 1 # We're inside the first {
-
-        while i < n and braceCount > 0:
-          let ch = peek()
-          case ch
-          of '{':
-            inc(braceCount)
-            cCode.add(ch)
-            advance()
-          of '}':
-            dec(braceCount)
-            if braceCount > 0:
-              cCode.add(ch)
-            advance()
-          else:
-            cCode.add(ch)
-            advance()
-
-        # Add C block token
-        tokens.add(
-          Token(
-            kind: tkCBlock,
-            lexeme: cCode,
-            line: line,
-            col: col - cCode.len - 3, # Adjust for @c{
-            isLiteral: false,
-          )
-        )
-      else:
-        # @ followed by something else
-        tokens.add(
-          Token(
-            kind: tkError,
-            lexeme: "Unexpected character after @: " & peek(1),
-            line: line,
-            col: col,
-            isLiteral: false,
-          )
-        )
-        advance()
-
-    # ============ OPERATORS & PUNCTUATION ============
-    of '=':
-      tokens.add(
-        Token(kind: tkAssign, lexeme: "=", line: line, col: col, isLiteral: false)
-      )
-      advance()
-    of '+':
-      tokens.add(
-        Token(kind: tkPlus, lexeme: "+", line: line, col: col, isLiteral: false)
-      )
-      advance()
-    of ':':
-      tokens.add(
-        Token(kind: tkColon, lexeme: ":", line: line, col: col, isLiteral: false)
-      )
-      advance()
-    of ',':
-      tokens.add(
-        Token(kind: tkComma, lexeme: ",", line: line, col: col, isLiteral: false)
-      )
-      advance()
-    of '.':
-      tokens.add(
-        Token(kind: tkDot, lexeme: ".", line: line, col: col, isLiteral: false)
-      )
-      advance()
-    of ';':
-      tokens.add(
-        Token(kind: tkSemicolon, lexeme: ";", line: line, col: col, isLiteral: false)
-      )
-      advance()
-    of '(':
-      tokens.add(
-        Token(kind: tkLParen, lexeme: "(", line: line, col: col, isLiteral: false)
-      )
-      advance()
-    of ')':
-      tokens.add(
-        Token(kind: tkRParen, lexeme: ")", line: line, col: col, isLiteral: false)
-      )
-      advance()
-    of '{':
-      tokens.add(
-        Token(kind: tkLBrace, lexeme: "{", line: line, col: col, isLiteral: false)
-      )
-      advance()
-    of '}':
-      tokens.add(
-        Token(kind: tkRBrace, lexeme: "}", line: line, col: col, isLiteral: false)
-      )
-      advance()
-
-    # ============ COMMENTS ============
-    of '/':
-      if peek(1) == '/':
-        # Line comment
-        while i < n and peek() != '\n':
-          advance()
-      else:
-        # Could be division operator, but for now error
-        tokens.add(
-          Token(
-            kind: tkError,
-            lexeme: "Unexpected character: " & ch,
-            line: line,
-            col: col,
-            isLiteral: false,
-          )
-        )
-        advance()
-
-    # ============ UNKNOWN ============
+      inc(i)
     else:
-      tokens.add(
-        Token(
-          kind: tkError,
-          lexeme: "Unexpected character: " & ch,
-          line: line,
-          col: col,
-          isLiteral: false,
-        )
-      )
-      advance()
+      tokens.add(createToken(tkError, "Unexpected character: " & ch, line, col))
+      inc(i)
+      inc(col)
 
   # Add EOF marker
-  tokens.add(Token(kind: tkEOF, lexeme: "", line: line, col: col, isLiteral: false))
-
+  tokens.add(createToken(tkEOF, "", line, col))
   return tokens
 
-# ============ SIMPLE PRETTY PRINTER ============
+# =========================== UTILITIES ============================
 proc `$`*(token: Token): string =
+  ## Pretty print token for debugging
   case token.kind
   of tkStringLit:
     "Token(" & $token.kind & ", line " & $token.line & ":" & $token.col & ", \"" &
