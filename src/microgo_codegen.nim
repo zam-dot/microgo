@@ -1,6 +1,6 @@
 # microgo_codegen.nim - Generate C code from AST
 import microgo_parser
-import strutils
+import std/[strutils, strformat]
 
 proc generateC*(node: Node, context: string = "global"): string =
   case node.kind
@@ -79,10 +79,11 @@ proc generateC*(node: Node, context: string = "global"): string =
       ) and "(" in cCode and "){" in cCode
 
     if looksLikeFunction and context != "global":
-      echo "Warning: Function definition inside function at line ", node.line
-      echo "This may not compile in standard C."
-      echo "Consider moving to top level:"
-      echo "  @c { ... }  # Instead of inside func ... { @c { ... } }"
+      echo fmt"""
+Warning: Function definition inside function at line {node.line}
+this may not compile to standard C.
+Consider moving to top level:
+@c {{ ... }}"""
 
     result = cCode
     if result.len > 0 and result[^1] != '\n':
@@ -142,10 +143,12 @@ proc generateC*(node: Node, context: string = "global"): string =
               inc(percentCount)
 
           if percentCount > 0 and node.callArgs.len == 1:
-            echo "Warning at line ", node.line, ":"
-            echo "  String has ", percentCount, " % characters"
-            echo "  But print() has only 1 argument"
-            echo "  Did you forget arguments for the format specifiers?"
+            echo fmt"""
+Warning at line {node.line}:
+String has {percentCount} % characters
+But print() has only 1 argument
+Did you forget arguments for the format specifiers?
+"""
 
           callCode &= generateC(firstArg, context)
           for i in 1 ..< node.callArgs.len:

@@ -89,7 +89,7 @@ proc lex*(source: string): seq[Token] =
     let ch = peek()
 
     case ch
-    # ============ WHITESPACE ============
+    # whitespace 
     of ' ', '\t':
       advance()
     of '\n':
@@ -205,7 +205,6 @@ proc lex*(source: string): seq[Token] =
           )
         )
       else:
-        # Unterminated string
         tokens.add(
           Token(
             kind: tkError,
@@ -334,7 +333,7 @@ proc lex*(source: string): seq[Token] =
       )
       advance()
 
-    # ============ COMMENTS (Go-style) ============
+    # ============ COMMENTS ============
     of '/':
       if peek(1) == '/':
         # Line comment

@@ -2,7 +2,7 @@
 import src/microgo_lexer
 import src/microgo_parser
 import src/microgo_codegen
-import std/[os, osproc, strutils]
+import std/[os, osproc, strutils, strformat]
 
 proc compileFile(filename: string) =
   echo "Compiling ", filename, "..."
@@ -29,7 +29,7 @@ proc compileFile(filename: string) =
   writeFile(outputFile, cCode)
   discard execShellCmd("clang-format -i " & outputFile & " 2>/dev/null")
 
-  echo "✅ Generated ", outputFile
+  echo "Generated ", outputFile
 
   # Optional: compile with gcc
   var exeFile = filename
@@ -43,7 +43,7 @@ proc compileFile(filename: string) =
 
   let result = execCmdEx(compileCmd)
   if result.exitCode == 0:
-    echo "✅ Compiled to ", exeFile
+    echo "Compiled to ", exeFile
     echo "Run with: ./" & exeFile
   else:
     echo "Compilation failed:"
@@ -51,12 +51,15 @@ proc compileFile(filename: string) =
 
 when isMainModule:
   if paramCount() == 0:
-    echo "MicroGo Compiler"
-    echo "Usage: microgo <file.mg>"
-    echo ""
-    echo "Example:"
-    echo "  microgo hello.mg"
-    echo "  ./hello"
+    echo fmt"""
+MicroGo Compiler
+
+Usage: microgo <file.mg>
+
+Example:
+  microgo main.mg
+  ./main
+"""
     quit(1)
 
   let filename = paramStr(1)
