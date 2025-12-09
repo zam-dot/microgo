@@ -16,8 +16,6 @@ proc compileToC(source: string): string =
 
 # =========================== FORMAT CODE ================================
 proc formatCode(cCode: string, filename: string): string =
-  echo "DEBUG: Input code length: ", cCode.len
-  echo "DEBUG: First 100 chars: ", cCode[0 .. min(99, cCode.high)]
   let tmpFile = filename & ".tmp.c"
   writeFile(tmpFile, cCode)
 

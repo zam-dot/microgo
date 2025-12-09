@@ -34,6 +34,7 @@ proc escapeString(str: string): string =
       result &= ch
 
 # =========================== FORWARD DECLARATIONS ============================
+proc generateFor(node: Node, context: CodegenContext): string
 proc generateExpression(node: Node): string
 proc generateBlock(node: Node, context: CodegenContext): string
 proc generateIf(node: Node, context: CodegenContext): string
@@ -199,6 +200,8 @@ proc generateBlock(node: Node, context: CodegenContext): string =
       stmtCode = generateCall(stmt, context)
     of nkIf:
       stmtCode = generateIf(stmt, context)
+    of nkFor: # <-- ADD THIS CASE
+      stmtCode = generateFor(stmt, context)
     else:
       continue # Skip unsupported statement types
 
@@ -258,6 +261,47 @@ proc generateProgram(node: Node): string =
     result &= "  return 0;\n"
     result &= "}\n"
 
+# =========================== LOOP GENERATORS ============================
+
+proc generateFor(node: Node, context: CodegenContext): string =
+  var code = "for ("
+
+  # Initialization
+  if node.forInit != nil:
+    case node.forInit.kind
+    of nkVarDecl:
+      code &=
+        "int " & node.forInit.varName & " = " & generateExpression(
+          node.forInit.varValue
+        )
+    of nkAssignment:
+      code &=
+        generateExpression(node.forInit.target) & " = " &
+        generateExpression(node.forInit.value)
+    else:
+      # Regular expression
+      code &= generateExpression(node.forInit)
+  code &= "; "
+
+  # Condition
+  if node.forCondition != nil:
+    code &= generateExpression(node.forCondition)
+  code &= "; "
+
+  # Update
+  if node.forUpdate != nil:
+    code &= generateExpression(node.forUpdate)
+  code &= ") {\n"
+
+  # Body
+  let bodyCode = generateBlock(node.forBody, cgFunction)
+  for line in bodyCode.splitLines:
+    if line.len > 0:
+      code &= "  " & line & "\n"
+
+  code &= "}\n"
+  return indentLine(code, context)
+
 # =========================== MAIN DISPATCH ============================
 proc generateC*(node: Node, context: string = "global"): string =
   let cgContext =
@@ -295,5 +339,7 @@ proc generateC*(node: Node, context: string = "global"): string =
     generateCall(node, cgContext)
   of nkIf:
     generateIf(node, cgContext)
+  of nkFor: # <-- ADD THIS CASE
+    generateFor(node, cgContext)
   of nkElse:
     ""
