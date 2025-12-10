@@ -52,7 +52,13 @@ proc generateLiteral(node: Node): string =
 proc generateIdentifier(node: Node): string =
   node.identName
 
+proc generateGroup(node: Node, context: CodegenContext): string =
+  "(" & generateExpression(node.groupExpr) & ")"
+
 proc generateExpression(node: Node): string =
+  if node == nil:
+    return ""
+
   case node.kind
   of nkBinaryExpr:
     generateExpression(node.left) & " " & node.op & " " & generateExpression(node.right)
@@ -60,8 +66,26 @@ proc generateExpression(node: Node): string =
     generateIdentifier(node)
   of nkLiteral, nkStringLit:
     generateLiteral(node)
+  of nkCall:
+    # Generate function call
+    var callCode = node.callFunc & "("
+    if node.callArgs.len > 0:
+      for i, arg in node.callArgs:
+        if i > 0:
+          callCode &= ", "
+        callCode &= generateExpression(arg)
+    callCode &= ")"
+    return callCode
+  of nkGroup:
+    "(" & generateExpression(node.groupExpr) & ")"
   else:
-    ""
+    # Add handlers for other expression-like nodes
+    case node.kind
+    of nkAssignment:
+      generateExpression(node.target) & " = " & generateExpression(node.value)
+    else:
+      echo "Error: Cannot generate expression for node kind: ", node.kind
+      "ERROR"
 
 # =========================== STATEMENT GENERATORS ============================
 proc generateCBlock(node: Node, context: CodegenContext): string =
@@ -90,51 +114,102 @@ Consider moving to top level:
     result &= "\n"
 
 proc generateVarDecl(node: Node, context: CodegenContext): string =
-  var code = "int " & node.varName & " = " & generateExpression(node.varValue) & ";\n"
+  var typeName = "int" # Default fallback
+
+  # Use the explicit type if provided
+  if node.varType.len > 0:
+    typeName = node.varType
+  elif node.varValue != nil:
+    # Infer from value if no explicit type
+    case node.varValue.kind
+    of nkLiteral:
+      if node.varValue.literalValue.contains('.'):
+        typeName = "double"
+      else:
+        typeName = "int"
+    of nkStringLit:
+      typeName = "char*"
+    else:
+      typeName = "int" # Default
+
+  var code = typeName & " " & node.varName & " = "
+
+  if node.varValue != nil:
+    code &= generateExpression(node.varValue)
+  else:
+    code &= "0" # Default value
+
+  code &= ";\n"
   return indentLine(code, context)
 
-proc generateCall(node: Node, context: CodegenContext): string =
-  var callCode = ""
+proc generateConstDecl(node: Node, context: CodegenContext): string =
+  var
+    constExpr = "0"
+    constType = "int"
 
-  if node.callFunc == "print":
-    callCode = "printf("
-
-    if node.callArgs.len == 0:
-      callCode &= "\"\\n\""
+  case node.constValue.kind
+  of nkLiteral:
+    if node.constValue.literalValue.contains('.'):
+      constExpr = node.constValue.literalValue
+      constType = "double"
     else:
-      let firstArg = node.callArgs[0]
-
-      if firstArg.kind == nkStringLit:
-        # Check for format specifiers vs argument count
-        let str = firstArg.literalValue
-        var percentCount = 0
-        for ch in str:
-          if ch == '%':
-            inc(percentCount)
-
-        if percentCount > 0 and node.callArgs.len == 1:
-          echo fmt"""
-Warning at line {node.line}:
-String has {percentCount} % characters
-But print() has only 1 argument
-Did you forget arguments for the format specifiers?
-"""
-
-        callCode &= generateExpression(firstArg)
-        for i in 1 ..< node.callArgs.len:
-          callCode &= ", " & generateExpression(node.callArgs[i])
-      else:
-        callCode &= "\"%d\", " & generateExpression(firstArg)
-
-    callCode &= ");\n"
+      constExpr = node.constValue.literalValue
+      constType = "int"
+  of nkStringLit:
+    constExpr = "\"" & escapeString(node.constValue.literalValue) & "\""
+    constType = "char*" # Just char*, not const char*
+  of nkIdentifier:
+    constExpr = node.constValue.identName
   else:
-    callCode = node.callFunc & "("
-    for i, arg in node.callArgs:
-      if i > 0:
-        callCode &= ", "
-      callCode &= generateExpression(arg)
-    callCode &= ");\n"
+    discard
 
+  if context == cgFunction:
+    var code = "const " & constType & " " & node.constName & " = " & constExpr & ";\n"
+    return indentLine(code, context)
+  else:
+    return "#define " & node.constName & " " & constExpr & "\n"
+
+proc generateCall(node: Node, context: CodegenContext): string =
+  let funcName = node.callFunc
+
+  if funcName != "print":
+    # Regular function - simple!
+    var callCode = funcName & "("
+    if node.callArgs.len > 0:
+      for i, arg in node.callArgs:
+        if i > 0:
+          callCode &= ", "
+        callCode &= generateExpression(arg)
+    callCode &= ");\n"
+    return indentLine(callCode, context)
+
+  # Otherwise, handle print (your existing code)
+  var callCode = "printf("
+
+  if node.callArgs.len == 0:
+    callCode &= "\"\\n\""
+  else:
+    let firstArg = node.callArgs[0]
+
+    case firstArg.kind
+    of nkStringLit:
+      callCode &= generateExpression(firstArg)
+      for i in 1 ..< node.callArgs.len:
+        callCode &= ", " & generateExpression(node.callArgs[i])
+    of nkLiteral:
+      # Check if it looks like a float (contains '.' or scientific notation)
+      if firstArg.literalValue.contains('.') or firstArg.literalValue.contains('e') or
+          firstArg.literalValue.contains('E'):
+        callCode &= "\"%g\", " & generateExpression(firstArg) # Float
+      else:
+        callCode &= "\"%d\", " & generateExpression(firstArg) # Integer
+    of nkIdentifier:
+      # For identifiers, default to %d (integer)
+      callCode &= "\"%d\", " & generateExpression(firstArg)
+    else:
+      callCode &= "\"%d\", " & generateExpression(firstArg)
+
+  callCode &= ");\n"
   return indentLine(callCode, context)
 
 proc generateAssignment(node: Node, context: CodegenContext): string =
@@ -196,11 +271,13 @@ proc generateBlock(node: Node, context: CodegenContext): string =
       stmtCode = generateCBlock(stmt, context)
     of nkVarDecl:
       stmtCode = generateVarDecl(stmt, context)
+    of nkConstDecl:
+      stmtCode = generateConstDecl(stmt, context)
     of nkCall:
       stmtCode = generateCall(stmt, context)
     of nkIf:
       stmtCode = generateIf(stmt, context)
-    of nkFor: # <-- ADD THIS CASE
+    of nkFor:
       stmtCode = generateFor(stmt, context)
     else:
       continue # Skip unsupported statement types
@@ -219,7 +296,17 @@ proc generateFunction(node: Node): string =
   if node.funcName == "main":
     code = "int main() {\n"
   else:
-    code = "void " & node.funcName & "() {\n"
+    code = node.returnType & " " & node.funcName & "("
+
+    # Generate parameters with correct types
+    if node.params.len > 0:
+      for i, param in node.params:
+        if i > 0:
+          code &= ", "
+        # param is nkVarDecl, so use varType and varName
+        code &= param.varType & " " & param.varName
+
+    code &= ") {\n"
 
   # Generate the function body (which is a block)
   if node.body != nil:
@@ -233,26 +320,39 @@ proc generateFunction(node: Node): string =
 
 proc generateProgram(node: Node): string =
   var
-    topLevelCode = ""
     functionCode = ""
     hasCMain = false
     hasMicroGoMain = false
+    includes = "" # Separate includes section
+    defines = "" # Separate defines section
+    otherTopLevel = "" # Other top-level code
 
+  # First pass: collect everything in correct order
   for funcNode in node.functions:
     case funcNode.kind
+    of nkConstDecl:
+      defines &= generateConstDecl(funcNode, cgGlobal)
     of nkCBlock:
       let cCode = generateCBlock(funcNode, cgGlobal)
-      topLevelCode &= cCode
+      # Check if it's an include statement
+      if cCode.strip().startsWith("#include"):
+        includes &= cCode
+      else:
+        otherTopLevel &= cCode
       if "int main()" in cCode:
         hasCMain = true
     of nkFunction:
       functionCode &= generateFunction(funcNode)
       if funcNode.funcName == "main":
         hasMicroGoMain = true
+    of nkVarDecl:
+      # Handle global variables if you want
+      otherTopLevel &= generateVarDecl(funcNode, cgGlobal)
     else:
       discard
 
-  result = topLevelCode & functionCode
+  # Build result in correct order: includes first, then defines, then other code
+  result = includes & defines & otherTopLevel & functionCode
 
   # Add auto-generated main if none exists
   if not hasCMain and not hasMicroGoMain:
@@ -329,6 +429,8 @@ proc generateC*(node: Node, context: string = "global"): string =
     generateCBlock(node, cgContext)
   of nkVarDecl:
     generateVarDecl(node, cgContext)
+  of nkConstDecl:
+    generateConstDecl(node, cgContext)
   of nkBinaryExpr:
     generateExpression(node)
   of nkIdentifier:
@@ -339,7 +441,9 @@ proc generateC*(node: Node, context: string = "global"): string =
     generateCall(node, cgContext)
   of nkIf:
     generateIf(node, cgContext)
-  of nkFor: # <-- ADD THIS CASE
+  of nkFor:
     generateFor(node, cgContext)
+  of nkGroup:
+    generateGroup(node, cgContext)
   of nkElse:
     ""

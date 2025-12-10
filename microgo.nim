@@ -28,7 +28,7 @@ proc formatCode(cCode: string, filename: string): string =
   removeFile(tmpFile)
   return result
 
-# ========================== COMPILE WITH GCC =============================
+# ========================== RUN WITH TCC ===============================
 proc compileAndRun(cFilename: string): bool =
   let cmd = "tcc -run " & cFilename & " 2>&1"
   let theResult = execCmdEx(cmd)
@@ -41,14 +41,6 @@ proc compileAndRun(cFilename: string): bool =
     echo "❌ Compilation/Runtime failed:"
     echo theResult.output
     return false
-  #  let theResult = execCmdEx(compileCmd)
-  # if theResult.exitCode == 0:
-  #   #    echo "Compiled to: ", outputExe
-  #   return true
-  # else:
-  #   echo "Compilation failed:"
-  #   echo theResult.output
-  #   return false
 
 # ========================== COMPILE FILE =================================
 proc compileFile(filename: string, runImmediately: bool = true): bool =
@@ -126,21 +118,19 @@ proc main() =
       quit(1)
     let filename = paramStr(2)
     if not buildFile(filename):
-      quit(1) # Missing this check!
+      quit(1)
   of "--help", "-h":
     showUsage()
     quit(0)
   else:
-    # Check if it's a flag or filename
     if command.startsWith("-"):
       echo "Unknown option: ", command
       showUsage()
       quit(1)
     else:
-      # Backward compatibility: treat as filename and run immediately
       let filename = command
-      if not runFile(filename): # Changed to runFile
-        quit(1) # Missing this check!
+      if not runFile(filename):
+        quit(1)
 
 when isMainModule:
   main()

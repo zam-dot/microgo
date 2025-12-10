@@ -1,7 +1,8 @@
 # microgo_lexer.nim 
-import std/[strutils, tables]
+import std/[tables, strutils]
 
 # =========================== TOKEN DEFINITIONS ============================
+# microgo_lexer.nim - Update the TokenKind enum
 type
   TokenKind* = enum
     # Keywords
@@ -16,13 +17,21 @@ type
     tkStruct = "struct"
     tkType = "type"
     tkVar = "var"
+    tkConst = "const"
     tkPrint = "print"
+
+    # Type keywords (ADD THESE - they were missing)
+    tkIntType = "int" # Type keyword 'int'
+    tkFloatType = "float" # Type keyword 'float'
+    tkStringType = "string" # Type keyword 'string'
+    tkBoolType = "bool" # Type keyword 'bool'
 
     # Literals and identifiers
     tkIdent = "identifier"
-    tkIntLit = "integer"
-    tkFloatLit = "float"
-    tkStringLit = "string"
+    tkIntLit = "integer" # Literal numbers like 42
+    tkFloatLit = "floatlit" # Literal floats like 3.14 (CHANGED from "float")
+    tkStringLit = "strlit" # Literal strings like "hello"
+    tkNumber = "number"
 
     # Operators and punctuation
     tkAssign = "="
@@ -33,8 +42,9 @@ type
     tkPlus = "+"
     tkMinus = "-"
     tkStar = "*"
+    tkModulus = "%"
     tkSlash = "/"
-    tkEq = "==" # Add these
+    tkEq = "=="
     tkNe = "!="
     tkLt = "<"
     tkGt = ">"
@@ -63,7 +73,7 @@ type
     else:
       discard
 
-# Keyword lookup table
+# Keyword lookup table - UPDATED
 const Keywords = {
   "for": tkFor,
   "func": tkFunc,
@@ -72,13 +82,18 @@ const Keywords = {
   "import": tkImport,
   "interface": tkInterface,
   "package": tkPackage,
-  "return": tkReturn,
   "struct": tkStruct,
   "type": tkType,
   "var": tkVar,
+  "const": tkConst,
   "print": tkPrint,
+  "return": tkReturn,
+  # TYPE KEYWORDS - ADD THESE
+  "int": tkIntType,
+  "float": tkFloatType,
+  "string": tkStringType,
+  "bool": tkBoolType,
 }.toTable
-
 # =========================== HELPER FUNCTIONS ============================
 proc createToken(
     kind: TokenKind,
@@ -155,7 +170,8 @@ proc scanNumber(source: string, i: var int, line, col: var int): Token =
   createToken(kind, lexeme, line, tokenCol, true, "", numVal)
 
 proc scanString(source: string, i: var int, line, col: var int): Token =
-  let start = i
+  let startLine = line
+  let startCol = col
   inc(i) # Skip opening quote
   inc(col)
 
@@ -177,7 +193,7 @@ proc scanString(source: string, i: var int, line, col: var int): Token =
         of '\\':
           strVal.add('\\')
         else:
-          strVal.add('\\') # Unknown escape, keep backslash
+          strVal.add('\\')
       inc(i)
       inc(col)
     else:
@@ -185,17 +201,19 @@ proc scanString(source: string, i: var int, line, col: var int): Token =
       inc(i)
       inc(col)
 
-  if i < source.len and source[i] == '"':
-    inc(i) # Skip closing quote
-    inc(col)
-    let
-      lexeme = source[start ..< i]
-      tokenCol = col - lexeme.len
-    createToken(tkStringLit, lexeme, line, tokenCol, true, strVal)
-  else:
-    createToken(tkError, "Unterminated string", line, col)
+  if i >= source.len:
+    return createToken(tkError, "Unterminated string", startLine, startCol)
+
+  # Skip closing quote
+  inc(i)
+  inc(col)
+
+  createToken(tkStringLit, "\"" & strVal & "\"", startLine, startCol, true, strVal)
 
 proc scanCBlock(source: string, i: var int, line, col: var int): Token =
+  let startLine = line
+  let startCol = col
+
   # Skip @c
   inc(i) # Skip @
   inc(col)
@@ -218,17 +236,15 @@ proc scanCBlock(source: string, i: var int, line, col: var int): Token =
   # Capture everything until matching }
   var
     cCode = ""
-    braceCount = 1 # We're inside the first {
-  let startCol = col
+    braceCount = 1
 
   while i < source.len and braceCount > 0:
-    case source[i]
-    of '{':
+    if source[i] == '{':
       inc(braceCount)
       cCode.add(source[i])
-    of '}':
+    elif source[i] == '}':
       dec(braceCount)
-      if braceCount > 0:
+      if braceCount > 0: # Only add if not the final closing brace
         cCode.add(source[i])
     else:
       cCode.add(source[i])
@@ -236,7 +252,8 @@ proc scanCBlock(source: string, i: var int, line, col: var int): Token =
     inc(i)
     inc(col)
 
-  createToken(tkCBlock, cCode, line, startCol)
+  # Now we're past the closing brace
+  createToken(tkCBlock, cCode, startLine, startCol)
 
 # =========================== MAIN LEXER ============================
 proc lex*(source: string): seq[Token] =
@@ -319,6 +336,10 @@ proc lex*(source: string): seq[Token] =
       tokens.add(createToken(tkStar, "*", line, col))
       inc(i)
       inc(col)
+    of '%':
+      tokens.add(createToken(tkModulus, "%", line, col))
+      inc(i)
+      inc(col)
     of ':':
       tokens.add(createToken(tkColon, ":", line, col))
       inc(i)
@@ -379,7 +400,6 @@ proc lex*(source: string): seq[Token] =
 
 # =========================== UTILITIES ============================
 proc `$`*(token: Token): string =
-  ## Pretty print token for debugging
   case token.kind
   of tkStringLit:
     "Token(" & $token.kind & ", line " & $token.line & ":" & $token.col & ", \"" &

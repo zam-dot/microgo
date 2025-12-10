@@ -1,9 +1,7 @@
 #include <stdio.h>
+int add(int a, int b) { return a + b; }
 int main() {
-    for (int i = 0; i < 5; i = i + 1) {
-        for (int j = 0; j < 5; j = j + 1) {
-            printf("%d, %d\n", i, j);
-        }
-    }
+    int x = add(32, 2);
+    printf("x = %d\n", x);
     return 0;
 }
