@@ -113,6 +113,7 @@ Consider moving to top level:
   if result.len > 0 and result[^1] != '\n':
     result &= "\n"
 
+# =========================== DECLARATION GENERATORS ============================
 proc generateVarDecl(node: Node, context: CodegenContext): string =
   var typeName = "int" # Default fallback
 
@@ -142,6 +143,7 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
   code &= ";\n"
   return indentLine(code, context)
 
+# ============================ DECLARATION GENERATORS ============================
 proc generateConstDecl(node: Node, context: CodegenContext): string =
   var
     constExpr = "0"
@@ -169,6 +171,7 @@ proc generateConstDecl(node: Node, context: CodegenContext): string =
   else:
     return "#define " & node.constName & " " & constExpr & "\n"
 
+# ============================ CALL GENERATORS ============================
 proc generateCall(node: Node, context: CodegenContext): string =
   let funcName = node.callFunc
 
@@ -212,11 +215,13 @@ proc generateCall(node: Node, context: CodegenContext): string =
   callCode &= ");\n"
   return indentLine(callCode, context)
 
+# =========================== ASSIGNMENT GENERATORS ===========================
 proc generateAssignment(node: Node, context: CodegenContext): string =
   var code =
     generateExpression(node.target) & " = " & generateExpression(node.value) & ";\n"
   return indentLine(code, context)
 
+# ============================ RETURN GENERATORS =============================
 proc generateReturn(node: Node, context: CodegenContext): string =
   var code = "return"
   if node.callArgs.len > 0:
@@ -224,6 +229,7 @@ proc generateReturn(node: Node, context: CodegenContext): string =
   code &= ";\n"
   return indentLine(code, context)
 
+# ============================== IF GENERATORS ================================
 proc generateIf(node: Node, context: CodegenContext): string =
   var code = "if (" & generateExpression(node.ifCondition) & ") {\n"
 
@@ -254,6 +260,7 @@ proc generateIf(node: Node, context: CodegenContext): string =
   code &= "\n"
   return indentLine(code, context)
 
+# ============================== GENERATE BLOCK ================================
 proc generateBlock(node: Node, context: CodegenContext): string =
   if node == nil:
     return ""
@@ -318,6 +325,7 @@ proc generateFunction(node: Node): string =
   code &= "}\n"
   return code
 
+# ============================= PROGRAM GENERATOR ==============================
 proc generateProgram(node: Node): string =
   var
     functionCode = ""
@@ -362,7 +370,6 @@ proc generateProgram(node: Node): string =
     result &= "}\n"
 
 # =========================== LOOP GENERATORS ============================
-
 proc generateFor(node: Node, context: CodegenContext): string =
   var code = "for ("
 

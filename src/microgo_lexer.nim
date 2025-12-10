@@ -19,8 +19,6 @@ type
     tkVar = "var"
     tkConst = "const"
     tkPrint = "print"
-
-    # Type keywords (ADD THESE - they were missing)
     tkIntType = "int" # Type keyword 'int'
     tkFloatType = "float" # Type keyword 'float'
     tkStringType = "string" # Type keyword 'string'
@@ -94,6 +92,7 @@ const Keywords = {
   "string": tkStringType,
   "bool": tkBoolType,
 }.toTable
+
 # =========================== HELPER FUNCTIONS ============================
 proc createToken(
     kind: TokenKind,
@@ -130,6 +129,7 @@ proc scanIdentifier(source: string, i: var int, line, col: var int): Token =
 
   createToken(kind, lexeme, line, tokenCol)
 
+# =========================== SCAN NUMBER ============================
 proc scanNumber(source: string, i: var int, line, col: var int): Token =
   let start = i
   var isFloat = false
@@ -169,6 +169,7 @@ proc scanNumber(source: string, i: var int, line, col: var int): Token =
 
   createToken(kind, lexeme, line, tokenCol, true, "", numVal)
 
+# =========================== SCAN STRING ============================
 proc scanString(source: string, i: var int, line, col: var int): Token =
   let startLine = line
   let startCol = col
@@ -210,6 +211,7 @@ proc scanString(source: string, i: var int, line, col: var int): Token =
 
   createToken(tkStringLit, "\"" & strVal & "\"", startLine, startCol, true, strVal)
 
+# =========================== SCAN C BLOCK ============================
 proc scanCBlock(source: string, i: var int, line, col: var int): Token =
   let startLine = line
   let startCol = col

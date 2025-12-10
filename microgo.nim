@@ -73,6 +73,7 @@ proc compileFile(filename: string, runImmediately: bool = true): bool =
   else:
     return true
 
+# =========================== SHOW USAGE ================================
 proc showUsage() =
   echo """
 MicroGo Compiler
@@ -90,9 +91,11 @@ Examples:
   microgo build hello.mg      # Generate hello.c only
 """
 
+# =========================== RUN FILE ===================================
 proc runFile(filename: string): bool =
   compileFile(filename, runImmediately = true)
 
+# =========================== BUILD FILE =================================
 proc buildFile(filename: string): bool =
   compileFile(filename, runImmediately = false)
 
