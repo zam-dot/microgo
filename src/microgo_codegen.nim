@@ -41,12 +41,12 @@ proc generateStructLiteral(node: Node): string
 proc generateIndexExpr(node: Node): string
 proc generateArrayLiteral(node: Node): string
 proc generateArrayType(node: Node): string
-
+proc generateSwitch(node: Node, context: CodegenContext): string
 # =========================== BASIC EXPRESSION GENERATORS ============================
 proc generateLiteral(node: Node): string =
   case node.kind
   of nkLiteral:
-    node.literalValue
+    if node.literalValue == "NULL": "NULL" else: node.literalValue
   of nkStringLit:
     "\"" & escapeString(node.literalValue) & "\""
   else:
@@ -73,6 +73,12 @@ proc generateExpression(node: Node): string =
       callCode = "free(" & generateExpression(node.callArgs[0]) & ")"
     elif funcName == "print":
       callCode = "printf(...)"
+    elif funcName == "len":
+      if node.callArgs.len == 1:
+        let arg = generateExpression(node.callArgs[0])
+        callCode = "sizeof(" & arg & ") / sizeof(" & arg & "[0])"
+      else:
+        callCode = "0"
     else:
       callCode = funcName & "("
       if node.callArgs.len > 0:
@@ -177,12 +183,8 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
   var typeName = "int"
   var isArray = false
 
-  if node.varValue != nil and node.varValue.kind == nkCall and
-      node.varValue.callFunc == "getmem":
-    typeName = "void*"
-  elif node.varType.len > 0:
+  if node.varType.len > 0:
     typeName = node.varType
-
     # Check if it's an array type (ends with [])
     if typeName.endsWith("[]"):
       isArray = true
@@ -191,7 +193,6 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
     # Infer from value
     case node.varValue.kind
     of nkArrayLit:
-      # Infer array type from first element
       isArray = true
       if node.varValue.elements.len > 0:
         let firstElem = node.varValue.elements[0]
@@ -214,18 +215,22 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
         typeName = "int"
     of nkStringLit:
       typeName = "char*"
-    of nkCall:
-      typeName = "void*"
+    of nkCall: # <-- ADD TO CASE, NOT NEW CASE
+      # Try to infer from function name
+      if node.varValue.callFunc == "getmem":
+        typeName = "void*"
+      else:
+        typeName = "int" # Default for other functions
     else:
       typeName = "int"
 
   # Build the declaration
   var code = ""
   if isArray:
-    # C syntax: type name[] = { ... };
     code = typeName & " " & node.varName & "[] = "
   else:
     code = typeName & " " & node.varName & " = "
+
   if node.varValue != nil:
     code &= generateExpression(node.varValue)
   else:
@@ -275,8 +280,14 @@ proc generateCall(node: Node, context: CodegenContext): string =
   let funcName = node.callFunc
   var callCode = ""
 
-  # Build the function call
   case funcName
+  of "len":
+    # Generate: sizeof(arr) / sizeof(arr[0])
+    if node.callArgs.len == 1:
+      let arg = generateExpression(node.callArgs[0])
+      callCode = "sizeof(" & arg & ") / sizeof(" & arg & "[0])"
+    else:
+      callCode = "0 /* len() error */"
   of "getmem":
     callCode = "malloc("
     if node.callArgs.len > 0:
@@ -316,11 +327,18 @@ proc generateCall(node: Node, context: CodegenContext): string =
   else:
     # Regular function call
     callCode = funcName & "("
+
+    # Add regular arguments
     if node.callArgs.len > 0:
       for i, arg in node.callArgs:
         if i > 0:
           callCode &= ", "
         callCode &= generateExpression(arg)
+
+    # TODO: Add error argument if function returns error
+    # For now, we're NOT adding it - we'll fix this later
+    # callCode &= ", &__microgo_error"  # Don't add yet!
+
     callCode &= ")"
 
   if context != cgExpression:
@@ -346,9 +364,26 @@ proc generateAssignment(node: Node, context: CodegenContext): string =
 
 # ============================ RETURN GENERATORS =============================
 proc generateReturn(node: Node, context: CodegenContext): string =
-  var code = "return"
-  if node.callArgs.len > 0:
-    code &= " " & generateExpression(node.callArgs[0])
+  var code = ""
+
+  if node.callArgs.len == 0:
+    code = "return"
+  elif node.callArgs.len == 1:
+    let retVal = generateExpression(node.callArgs[0])
+
+    # Check if returning a string (error) or value
+    # Simple heuristic: if it's a string literal, it's an error
+    if node.callArgs[0].kind == nkStringLit:
+      # Error return: set error_out and return default value
+      code = "*error_out = " & retVal & ";\n"
+      code &= "  return" # Return without value (or default)
+    else:
+      # Normal return
+      code = "return " & retVal
+  else:
+    # Multiple returns (tuples) - handle if needed
+    discard
+
   code &= ";\n"
   return indentLine(code, context)
 
@@ -466,6 +501,8 @@ proc generateBlock(node: Node, context: CodegenContext): string =
       stmtCode = generateIf(stmt, context)
     of nkFor:
       stmtCode = generateFor(stmt, context)
+    of nkSwitch:
+      stmtCode = generateSwitch(stmt, context)
     else:
       continue
 
@@ -485,25 +522,99 @@ proc generateFunction(node: Node): string =
   else:
     code = node.returnType & " " & node.funcName & "("
 
-    # Generate parameters with correct types
+    # Add parameters
     if node.params.len > 0:
       for i, param in node.params:
         if i > 0:
           code &= ", "
         code &= param.varType & " " & param.varName
+
+    # ADD ERROR PARAMETER if function returns error
+    if node.returnsError:
+      if node.params.len > 0:
+        code &= ", "
+      code &= "char** error_out" # Add error out parameter
+
     code &= ") {\n"
 
-  # Generate the function body (which is a block)
+  # Initialize error to NULL at function start
+  if node.returnsError:
+    code &= "  *error_out = NULL;\n"
+
+  # Generate body
   if node.body != nil:
     code &= generateBlock(node.body, cgFunction)
 
+  # Add default return for main
   if node.funcName == "main":
     code &= "  return 0;\n"
 
   code &= "}\n"
   return code
 
-# ============================= PROGRAM GENERATOR ==============================
+# =========================== SWITCH GENERATOR ============================
+proc generateSwitch(node: Node, context: CodegenContext): string =
+  var code = "switch (" & generateExpression(node.switchTarget) & ") {\n"
+
+  # Check if node has proper data
+  if node.switchTarget == nil:
+    return ""
+
+  for caseNode in node.cases:
+    # Generate each case value (multiple values per case)
+    for i, value in caseNode.caseValues:
+      code &= "  case " & generateExpression(value) & ":\n"
+
+    # Generate case body (with proper indentation)
+    let bodyCode = generateBlock(caseNode.caseBody, cgFunction)
+    for line in bodyCode.splitLines:
+      if line.len > 0:
+        code &= "    " & line & "\n"
+
+    # Add break after each case (unless it falls through)
+    code &= "    break;\n"
+
+  # Generate default case
+  if node.defaultCase != nil:
+    code &= "  default:\n"
+    let defaultCode = generateBlock(node.defaultCase.defaultBody, cgFunction)
+    for line in defaultCode.splitLines:
+      if line.len > 0:
+        code &= "    " & line & "\n"
+    code &= "    break;\n"
+
+  code &= "}\n"
+  return indentLine(code, context)
+
+# =========================== CASE GENERATOR ============================
+proc generateCase(node: Node, context: CodegenContext): string {.used.} =
+  # This would be called from within generateSwitch/generateSwitchExpr
+  var code = ""
+  for i, value in node.caseValues:
+    if i > 0:
+      code &= "case "
+    else:
+      code &= "case "
+
+    code &= generateExpression(value)
+
+    if i < node.caseValues.len - 1:
+      code &= ":\n"
+
+  code &= ":\n"
+
+  # Add the body
+  code &= generateBlock(node.caseBody, cgFunction)
+
+  return code
+
+# =========================== DEFAULT GENERATOR ============================
+proc generateDefault(node: Node, context: CodegenContext): string {.used.} =
+  var code = "default:\n"
+  code &= generateBlock(node.defaultBody, cgFunction)
+  return
+    code # ============================= PROGRAM GENERATOR ==============================
+
 proc generateProgram(node: Node): string =
   var
     functionCode = ""
@@ -592,11 +703,22 @@ proc generateC*(node: Node, context: string = "global"): string =
   of nkLiteral, nkStringLit:
     generateLiteral(node)
   of nkCall:
-    generateCall(node, cgContext)
+    return generateCall(node, cgExpression)
   of nkIf:
     generateIf(node, cgContext)
   of nkFor:
     generateFor(node, cgContext)
+  of nkSwitch:
+    generateSwitch(node, cgContext)
+  of nkCase:
+    # Case nodes are handled within generateSwitch, but we need a placeholder
+    "/* case */"
+  of nkDefault:
+    # Default nodes are handled within generateSwitch, but we need a placeholder
+    "/* default */"
+  of nkSwitchExpr:
+    # We'll implement this later  
+    "/* switch_expr */"
   of nkGroup:
     generateGroup(node, cgContext)
   of nkElse:

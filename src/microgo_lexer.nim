@@ -21,6 +21,11 @@ type
     tkGetMem = "getmem"
     tkFreeMem = "freemem"
     tkSizeOf = "sizeof"
+    tkSwitch = "switch"
+    tkCase = "case"
+    tkDefault = "default"
+    tkNil = "nil"
+    tkLen = "len"
 
     # Literals and identifiers
     tkIdent = "identifier"
@@ -89,6 +94,12 @@ const Keywords = {
   "float": tkFloatType,
   "string": tkStringType,
   "bool": tkBoolType,
+  "switch": tkSwitch,
+  "case": tkCase,
+  "default": tkDefault,
+  "error": tkError,
+  "nil": tkNil,
+  "len": tkLen,
 }.toTable
 
 # =========================== HELPER FUNCTIONS ============================
