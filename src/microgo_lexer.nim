@@ -152,7 +152,7 @@ proc scanNumber(source: string, i: var int, line, col: var int): Token =
   if i < source.len and source[i] == '.' and i + 1 < source.len and
       source[i + 1] in {'0' .. '9'}:
     isFloat = true
-    inc(i) # Skip '.'
+    inc(i)
     inc(col)
     while i < source.len and source[i] in {'0' .. '9'}:
       inc(i)
@@ -161,7 +161,7 @@ proc scanNumber(source: string, i: var int, line, col: var int): Token =
   # Optional exponent
   if i < source.len and source[i] in {'e', 'E'}:
     isFloat = true
-    inc(i) # Skip 'e'
+    inc(i)
     inc(col)
     if i < source.len and source[i] in {'+', '-'}:
       inc(i)
@@ -226,10 +226,9 @@ proc scanCBlock(source: string, i: var int, line, col: var int): Token =
   let startLine = line
   let startCol = col
 
-  # Skip @c
-  inc(i) # Skip @
+  inc(i)
   inc(col)
-  inc(i) # Skip c
+  inc(i)
   inc(col)
 
   # Skip optional whitespace

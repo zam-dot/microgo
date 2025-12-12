@@ -66,15 +66,7 @@ proc compileToC(source: string, filename: string = ""): string =
     else:
       getCurrentDir()
 
-  # echo "=== BEFORE resolveImports ==="
-  # echo source
-  # echo "============================="
-
   let resolvedSource = resolveImports(source, baseDir)
-
-  # echo "=== AFTER resolveImports ==="
-  # echo resolvedSource
-  # echo "============================"
 
   # Then compile as normal
   let
