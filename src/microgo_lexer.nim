@@ -27,6 +27,7 @@ type
     tkNil = "nil"
     tkLen = "len"
     tkSizeTType = "size_t"
+    tkDefer = "defer"
 
     # Literals and identifiers
     tkIdent = "identifier"
@@ -104,6 +105,7 @@ const Keywords = {
   "error": tkError,
   "nil": tkNil,
   "len": tkLen,
+  "defer": tkDefer,
 }.toTable
 
 # =========================== HELPER FUNCTIONS ============================

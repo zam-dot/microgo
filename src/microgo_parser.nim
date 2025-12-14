@@ -33,6 +33,7 @@ type NodeKind* = enum
   nkDefault = "default"
   nkSwitchExpr = "switch_expr"
   nkInferredVarDecl = "inferred_var_decl"
+  nkDefer = "defer"
 
 # ================================= AST NODE ==================================
 type Node* = ref object
@@ -111,6 +112,8 @@ type Node* = ref object
     forCondition*: Node
     forUpdate*: Node
     forBody*: Node
+  of nkDefer:
+    deferExpr*: Node
   else:
     discard
 
@@ -363,6 +366,23 @@ proc parseCallArguments(p: Parser): seq[Node] =
         args.add(nextArg)
 
   return args
+
+# =========================== DEFER PARSER ============================
+proc parseDefer(p: Parser): Node =
+  let
+    line = p.current.line
+    col = p.current.col
+
+  if not p.expect(tkDefer):
+    return nil
+
+  # Parse the expression to defer (usually a function call)
+  let expr = parseExpression(p)
+  if expr == nil:
+    echo "Error: Expected expression after 'defer' at line ", line, ":", col
+    return nil
+
+  return Node(kind: nkDefer, line: line, col: col, nodeKind: nkDefer, deferExpr: expr)
 
 # =========================== TYPE PARSER ============================
 proc parseType(p: Parser): string =
@@ -1072,6 +1092,8 @@ proc parseStatement(p: Parser): Node =
     return parseReturn(p)
   of tkSwitch:
     return parseSwitch(p)
+  of tkDefer:
+    return parseDefer(p)
   else:
     return nil
 
@@ -1287,6 +1309,10 @@ proc parseFunction(p: Parser): Node =
   if body == nil:
     echo "Error: Expected function body"
     return nil
+
+  echo "DEBUG: Parsing function ", ident.identName, " with ", params.len, " params"
+  for param in params:
+    echo "  Param: ", param.varName, " : ", param.varType
 
   return Node(
     kind: nkFunction,

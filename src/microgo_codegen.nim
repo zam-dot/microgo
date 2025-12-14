@@ -414,16 +414,14 @@ proc generateAssignment(node: Node, context: CodegenContext): string =
 proc generateReturn(node: Node, context: CodegenContext): string =
   var code = ""
 
+  # TODO: We need access to the deferStack here!
+  # For now, just generate the return
+
   if node.callArgs.len == 0:
     code = "return"
   elif node.callArgs.len == 1:
     let retVal = generateExpression(node.callArgs[0])
-
-    if node.callArgs[0].kind == nkStringLit:
-      code = "*error_out = " & retVal & ";\n"
-      code &= "  return"
-    else:
-      code = "return " & retVal
+    code = "return " & retVal
   else:
     discard
 
@@ -524,35 +522,48 @@ proc generateBlock(node: Node, context: CodegenContext): string =
     return ""
 
   var blockResult = ""
+  var deferStack: seq[string] = @[]
+
   for stmt in node.statements:
-    var stmtCode = ""
-
     case stmt.kind
-    of nkAssignment:
-      stmtCode = generateAssignment(stmt, context)
-    of nkReturn:
-      stmtCode = generateReturn(stmt, context)
-    of nkCBlock:
-      stmtCode = generateCBlock(stmt, context)
-    of nkVarDecl:
-      stmtCode = generateVarDecl(stmt, context)
-    of nkConstDecl:
-      stmtCode = generateConstDecl(stmt, context)
-    of nkCall:
-      stmtCode = generateCall(stmt, context)
-    of nkIf:
-      stmtCode = generateIf(stmt, context)
-    of nkFor:
-      stmtCode = generateFor(stmt, context)
-    of nkSwitch:
-      stmtCode = generateSwitch(stmt, context)
+    of nkDefer:
+      # Collect defer expression
+      let deferCode = generateExpression(stmt.deferExpr)
+      deferStack.add(deferCode & ";\n")
     else:
-      continue
+      # Generate normal statement
+      var stmtCode = ""
 
-    if stmtCode.len > 0:
-      blockResult &= stmtCode
-      if stmtCode[^1] != '\n':
-        blockResult &= "\n"
+      case stmt.kind
+      of nkAssignment:
+        stmtCode = generateAssignment(stmt, context)
+      of nkReturn:
+        stmtCode = generateReturn(stmt, context)
+      of nkCBlock:
+        stmtCode = generateCBlock(stmt, context)
+      of nkVarDecl:
+        stmtCode = generateVarDecl(stmt, context)
+      of nkConstDecl:
+        stmtCode = generateConstDecl(stmt, context)
+      of nkCall:
+        stmtCode = generateCall(stmt, context)
+      of nkIf:
+        stmtCode = generateIf(stmt, context)
+      of nkFor:
+        stmtCode = generateFor(stmt, context)
+      of nkSwitch:
+        stmtCode = generateSwitch(stmt, context)
+      else:
+        continue # Skip unknown statement types
+
+      if stmtCode.len > 0:
+        blockResult &= stmtCode
+
+  # Add deferred statements at end of block (in reverse order)
+  if deferStack.len > 0:
+    blockResult &= "\n  // Deferred statements\n"
+    for i in countdown(deferStack.len - 1, 0):
+      blockResult &= indentLine(deferStack[i], context)
 
   return blockResult
 
@@ -560,33 +571,103 @@ proc generateBlock(node: Node, context: CodegenContext): string =
 proc generateFunction(node: Node): string =
   var code = ""
 
+  echo "DEBUG generateFunction: ",
+    node.funcName, " return=", node.returnType, " params=", node.params.len
+
   if node.funcName == "main":
     code = "int main() {\n"
   else:
     code = node.returnType & " " & node.funcName & "("
 
+    # DEBUG: Show what we're adding
+    echo "  Building signature: ", code
+
+    # ADD PARAMETERS HERE (BEFORE closing parenthesis)
     if node.params.len > 0:
       for i, param in node.params:
         if i > 0:
           code &= ", "
         code &= param.varType & " " & param.varName
+        echo "    Added param: ", param.varType, " ", param.varName
+    else:
+      code &= "void"
+      echo "    No params, adding 'void'"
 
-    if node.returnsError:
-      if node.params.len > 0:
-        code &= ", "
-      code &= "char** error_out"
+    # NOW close the parentheses
     code &= ") {\n"
+    echo "  Final signature: ", code
 
   if node.returnsError:
     code &= "  *error_out = NULL;\n"
 
-  # Generate body
-  if node.body != nil:
-    code &= generateBlock(node.body, cgFunction)
+  # Track defer statements
+  var deferStack: seq[string] = @[]
+  var hasExplicitReturn = false
 
-  # Add default return for main
-  if node.funcName == "main":
-    code &= "  return 0;\n"
+  # Generate function body, collecting defers
+  if node.body != nil:
+    for stmt in node.body.statements:
+      if stmt.kind == nkDefer:
+        # Collect defer expression for later
+        let deferCode = generateCall(stmt.deferExpr, cgExpression) & ";\n"
+        deferStack.add("  " & deferCode)
+      elif stmt.kind == nkReturn:
+        # Handle return statement specially
+        hasExplicitReturn = true
+
+        # Generate return with defer execution first
+        var returnCode = ""
+        if deferStack.len > 0:
+          returnCode &= "\n  // Execute deferred statements\n"
+          for i in countdown(deferStack.len - 1, 0):
+            returnCode &= deferStack[i]
+
+        # Add the actual return
+        if stmt.callArgs.len == 0:
+          returnCode &= "  return;\n"
+        elif stmt.callArgs.len == 1:
+          let retVal = generateExpression(stmt.callArgs[0])
+          returnCode &= "  return " & retVal & ";\n"
+        else:
+          returnCode &= "  return;\n"
+
+        code &= returnCode
+      else:
+        # Generate normal statement
+        case stmt.kind
+        of nkAssignment:
+          code &= generateAssignment(stmt, cgFunction)
+        of nkCall:
+          code &= generateCall(stmt, cgFunction)
+        of nkVarDecl:
+          code &= generateVarDecl(stmt, cgFunction)
+        of nkCBlock:
+          code &= generateCBlock(stmt, cgFunction)
+        of nkConstDecl:
+          code &= generateConstDecl(stmt, cgFunction)
+        of nkIf:
+          code &= generateIf(stmt, cgFunction)
+        of nkFor:
+          code &= generateIf(stmt, cgFunction)
+        of nkSwitch:
+          code &= generateSwitch(stmt, cgFunction)
+        else:
+          discard
+
+  # If no explicit return, add defer cleanup and default return
+  if not hasExplicitReturn:
+    if deferStack.len > 0:
+      code &= "\n  // Deferred statements\n"
+      for i in countdown(deferStack.len - 1, 0):
+        code &= deferStack[i]
+
+    # Add default return for main
+    if node.funcName == "main":
+      code &= "  return 0;\n"
+    elif node.returnType != "void":
+      # Non-void functions need a return value
+      code &= "  // WARNING: Missing return value\n"
+      code &= "  return 0;\n"
 
   code &= "}\n"
   return code
@@ -623,6 +704,11 @@ proc generateSwitch(node: Node, context: CodegenContext): string =
 
   code &= "}\n"
   return indentLine(code, context)
+
+# =========================== DEFER GENERATOR ============================
+proc generateDefer(node: Node, context: CodegenContext): string =
+  # Defer statements are handled in generateBlock
+  return ""
 
 # =========================== CASE GENERATOR ============================
 proc generateCase(node: Node, context: CodegenContext): string {.used.} =
@@ -744,6 +830,8 @@ proc generateC*(node: Node, context: string = "global"): string =
     generateFor(node, cgContext)
   of nkSwitch:
     generateSwitch(node, cgContext)
+  of nkDefer:
+    return generateDefer(node, cgContext)
   of nkCase:
     "/* case */"
   of nkDefault:
