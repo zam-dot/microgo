@@ -53,6 +53,7 @@ type
     tkGt = ">"
     tkLe = "<="
     tkGe = ">="
+    tkColonAssign = ":="
 
     # Brackets
     tkLParen = "("
@@ -415,9 +416,14 @@ proc lex*(source: string): seq[Token] =
       inc(i)
       inc(col)
     of ':':
-      tokens.add(createToken(tkColon, ":", line, col))
-      inc(i)
-      inc(col)
+      if i + 1 < source.len and source[i + 1] == '=':
+        tokens.add(createToken(tkColonAssign, ":=", line, col))
+        inc(i, 2)
+        inc(col, 2)
+      else:
+        tokens.add(createToken(tkColon, ":", line, col))
+        inc(i)
+        inc(col)
     of ',':
       tokens.add(createToken(tkComma, ",", line, col))
       inc(i)

@@ -32,6 +32,7 @@ type NodeKind* = enum
   nkCase = "case"
   nkDefault = "default"
   nkSwitchExpr = "switch_expr"
+  nkInferredVarDecl = "inferred_var_decl"
 
 # ================================= AST NODE ==================================
 type Node* = ref object
@@ -122,12 +123,19 @@ type Parser* = ref object
 # =========================== PRECEDENCE TABLE ============================
 proc getPrecedence(kind: TokenKind): int =
   case kind
-  of tkAssign: 1
-  of tkEq, tkNe: 2
-  of tkLt, tkGt, tkLe, tkGe: 3
-  of tkPlus, tkMinus: 4
-  of tkStar, tkSlash, tkModulus: 5
-  else: 0
+  of tkAssign, tkColonAssign:
+    1
+  # Both have same precedence
+  of tkEq, tkNe:
+    2
+  of tkLt, tkGt, tkLe, tkGe:
+    3
+  of tkPlus, tkMinus:
+    4
+  of tkStar, tkSlash, tkModulus:
+    5
+  else:
+    0
 
 # =========================== FORWARD DECLARATIONS ============================
 proc parseReturn(p: Parser): Node
@@ -191,6 +199,40 @@ proc parseIdentifier(p: Parser): Node =
   else:
     result = nil
 
+proc parseInferredVarDecl(p: Parser): Node =
+  ## Parse x := value (type inferred from value)
+  let line = p.current.line
+  let col = p.current.col
+
+  # Parse identifier
+  let ident = parseIdentifier(p)
+  if ident == nil:
+    echo "Error: Expected identifier in inferred declaration at line ", line, ":", col
+    return nil
+
+  # Expect :=
+  if not p.expect(tkColonAssign):
+    echo "Error: Expected ':=' after identifier at line ", line, ":", col
+    return nil
+
+  # Parse the value
+  let value = parseExpression(p)
+  if value == nil:
+    echo "Error: Expected expression after ':=' at line ",
+      p.current.line, ":", p.current.col
+    return nil
+
+  # Create variable declaration node with empty type (to be inferred)
+  return Node(
+    kind: nkVarDecl,
+    line: line,
+    col: col,
+    nodeKind: nkVarDecl,
+    varName: ident.identName,
+    varType: "", # Empty string means type should be inferred
+    varValue: value,
+  )
+
 # =========================== LITERAL PARSER ============================
 proc parseLiteral(p: Parser): Node =
   case p.current.kind
@@ -249,25 +291,24 @@ proc parseCBlock(p: Parser): Node =
 
 # =========================== EXPRESSION PARSER ============================
 proc parseExpression(p: Parser, minPrecedence: int = 0): Node =
-  # Parse primary expression (number, identifier, parenthesized, etc.)
   var left = parsePrimary(p)
   if left == nil:
     return nil
 
-  # Keep parsing while we have operators with higher precedence
   while true:
     let curr = p.current
     if curr.kind == tkEOF:
       break
 
-    # Check if current token is a binary operator
     let currPrec = getPrecedence(curr.kind)
     if currPrec < minPrecedence:
       break
 
-    # Special handling for assignment (right-associative)
-    if curr.kind == tkAssign:
+    # Handle both assignment operators
+    if curr.kind in {tkAssign, tkColonAssign}:
+      let isInferred = (curr.kind == tkColonAssign)
       p.advance()
+
       let right = parseExpression(p, currPrec - 1)
       left = Node(
         kind: nkBinaryExpr,
@@ -276,7 +317,7 @@ proc parseExpression(p: Parser, minPrecedence: int = 0): Node =
         nodeKind: nkBinaryExpr,
         left: left,
         right: right,
-        op: "=",
+        op: if isInferred: ":=" else: "=",
       )
       continue
 
@@ -1008,6 +1049,11 @@ proc parseStatement(p: Parser): Node =
       p.advance()
     return callNode
   of tkIdent:
+    # Check if this is x := value
+    if p.peek(1).kind == tkColonAssign:
+      return parseInferredVarDecl(p)
+
+    # Otherwise try assignment or call
     var assignment = parseAssignmentStatement(p)
     if assignment != nil:
       return assignment

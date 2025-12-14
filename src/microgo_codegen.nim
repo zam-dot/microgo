@@ -186,74 +186,107 @@ proc inferTypeFromExpression(expr: Node): string =
 
   case expr.kind
   of nkLiteral:
-    if expr.literalValue.contains('.'):
+    let val = expr.literalValue
+
+    # Check for character literal
+    if val.len >= 2 and val[0] == '\'' and val[^1] == '\'':
+      return "char"
+
+    # Check if it's float
+    if val.contains('.') or val.contains('e') or val.contains('E'):
       return "double"
     else:
+      # Check for special values
+      if val == "NULL":
+        return "void*"
+      if val == "true" or val == "false":
+        return "bool"
+
+      # Assume integer
       return "int"
   of nkStringLit:
     return "char*"
+  of nkIdentifier:
+    # TODO: Look up in symbol table
+    return "int"
   of nkCall:
     let funcName = expr.callFunc
     case funcName
-    of "getmem":
-      return "size_t"
-    of "openFile", "fopen", "openfile":
-      return "FILE *"
-    of "malloc", "calloc":
+    of "getmem", "malloc", "calloc":
       return "void*"
     of "len":
       return "size_t"
-    of "print":
-      return "int" # printf returns int
     else:
-      # Pattern matching on function names
-      if funcName.contains("open") or funcName.contains("fopen") or
-          funcName.contains("file") or funcName.contains("File"):
-        return "FILE*"
-      elif funcName.contains("alloc") or funcName.contains("malloc"):
-        return "void*"
-      elif funcName.contains("str") or funcName.contains("string"):
-        return "char*"
-      else:
-        return "size_t*" # Generic pointer fallback
+      return "int" # Default
   of nkArrayLit:
     if expr.elements.len > 0:
-      return inferTypeFromExpression(expr.elements[0]) & "*" # Array becomes pointer
+      let elemType = inferTypeFromExpression(expr.elements[0])
+      return elemType # RIGHT: returns "int" (base type)
     else:
-      return "int*"
+      return "int" # Default for empty array
+  of nkBinaryExpr:
+    # Simple type inference
+    let leftType = inferTypeFromExpression(expr.left)
+    let rightType = inferTypeFromExpression(expr.right)
+
+    if leftType == "double" or rightType == "double":
+      return "double"
+    elif leftType == "char*" or rightType == "char*":
+      return "char*"
+    else:
+      return "int"
   else:
-    return "size_t*"
+    return "int"
 
 # Then simplify generateVarDecl:
 proc generateVarDecl(node: Node, context: CodegenContext): string =
-  var typeName = "int"
+  var typeName = node.varType
   var isArray = false
 
-  if node.varType.len > 0:
-    typeName = node.varType
-    if typeName.endsWith("[]"):
-      isArray = true
-      typeName = typeName[0 ..^ 3]
-  elif node.varValue != nil:
+  # If no explicit type, infer from value
+  if typeName.len == 0 and node.varValue != nil:
     typeName = inferTypeFromExpression(node.varValue)
+
     # Check if value is array literal
     if node.varValue.kind == nkArrayLit:
       isArray = true
-      # Remove the * that inferTypeFromExpression might have added
       if typeName.endsWith("*"):
         typeName = typeName[0 ..^ 2]
+
+  # Handle array types from explicit annotation
+  elif typeName.endsWith("[]"):
+    isArray = true
+    typeName = typeName[0 ..^ 3]
+  elif typeName.contains("[") and typeName.contains("]"):
+    # Already has array dimensions
+    isArray = true
 
   # Build the declaration
   var code = ""
   if isArray:
-    code = typeName & " " & node.varName & "[] = "
+    # Check if we have an array literal to initialize
+    if node.varValue != nil and node.varValue.kind == nkArrayLit:
+      code = typeName & " " & node.varName & "[] = "
+    else:
+      # Dynamic array
+      code = typeName & "* " & node.varName & " = "
   else:
     code = typeName & " " & node.varName & " = "
 
   if node.varValue != nil:
     code &= generateExpression(node.varValue)
   else:
-    code &= "0"
+    # Default initialization
+    if typeName == "char*":
+      code &= "NULL"
+    elif typeName in ["int", "long", "short", "size_t"]:
+      code &= "0"
+    elif typeName in ["float", "double"]:
+      code &= "0.0"
+    elif typeName == "bool":
+      code &= "false"
+    else:
+      code &= "NULL" # Pointer types
 
   code &= ";\n"
   return indentLine(code, context)
@@ -691,7 +724,7 @@ proc generateC*(node: Node, context: string = "global"): string =
     generateBlock(node, cgContext)
   of nkCBlock:
     generateCBlock(node, cgContext)
-  of nkVarDecl:
+  of nkVarDecl, nkInferredVarDecl:
     generateVarDecl(node, cgContext)
   of nkConstDecl:
     generateConstDecl(node, cgContext)
@@ -704,7 +737,7 @@ proc generateC*(node: Node, context: string = "global"): string =
   of nkLiteral, nkStringLit:
     generateLiteral(node)
   of nkCall:
-    return generateCall(node, cgExpression)
+    return generateCall(node, cgContext)
   of nkIf:
     generateIf(node, cgContext)
   of nkFor:
