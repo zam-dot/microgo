@@ -34,6 +34,7 @@ type NodeKind* = enum
   nkSwitchExpr = "switch_expr"
   nkInferredVarDecl = "inferred_var_decl"
   nkDefer = "defer"
+  nkForRange = "for_range"
 
 # ================================= AST NODE ==================================
 type Node* = ref object
@@ -112,6 +113,11 @@ type Node* = ref object
     forCondition*: Node
     forUpdate*: Node
     forBody*: Node
+  of nkForRange:
+    rangeIndex*: Node # Optional: index variable (i in for i, v)
+    rangeValue*: Node # Optional: value variable (v in for i, v)  
+    rangeTarget*: Node # What we're iterating over (array, range)
+    rangeBody*: Node # Loop body
   of nkDefer:
     deferExpr*: Node
   else:
@@ -137,10 +143,13 @@ proc getPrecedence(kind: TokenKind): int =
     4
   of tkStar, tkSlash, tkModulus:
     5
+  of tkDotDot:
+    6
   else:
     0
 
 # =========================== FORWARD DECLARATIONS ============================
+proc parseForRange(p: Parser): Node
 proc parseReturn(p: Parser): Node
 proc parsePrimary(p: Parser): Node
 proc parseExpression(p: Parser, minPrecedence: int = 0): Node
@@ -1104,6 +1113,42 @@ proc parseStatement(p: Parser): Node =
   of tkIf:
     return parseIf(p)
   of tkFor:
+    echo "DEBUG: Found 'for' token"
+    # Peek ahead to see if it's a range loop
+    let savedPos = p.pos
+
+    # Skip 'for'
+    p.advance()
+    echo "  After skipping 'for': token=", p.current.kind, " '", p.current.lexeme, "'"
+
+    # Check if next tokens match pattern: ident (',' ident)? 'in'
+    if p.current.kind == tkIdent:
+      echo "  Found identifier"
+      p.advance() # Skip identifier
+
+      if p.current.kind == tkComma:
+        echo "  Found comma"
+        p.advance()
+        if p.current.kind == tkIdent:
+          echo "  Found second identifier"
+          p.advance()
+
+      echo "  Current token after identifiers: ",
+        p.current.kind, " '", p.current.lexeme, "'"
+
+      if p.current.kind == tkIn:
+        echo "  Found 'in' - it's a range loop!"
+        # It's a range loop! Reset and parse it
+        p.pos = savedPos
+        p.current = p.tokens[savedPos]
+        return parseForRange(p)
+      else:
+        echo "  Not 'in', it's: ", p.current.kind
+
+    # Not a range loop, reset and parse as regular for
+    echo "  Falling back to regular for loop"
+    p.pos = savedPos
+    p.current = p.tokens[savedPos]
     return parseFor(p)
   of tkReturn:
     return parseReturn(p)
@@ -1473,6 +1518,72 @@ proc parseFor(p: Parser): Node =
     forCondition: condition,
     forUpdate: update,
     forBody: body,
+  )
+
+# =========================== FOR RANGE LOOP PARSER ============================
+proc parseForRange(p: Parser): Node =
+  echo "DEBUG parseForRange: called"
+  let
+    line = p.current.line
+    col = p.current.col
+
+  if not p.expect(tkFor):
+    return nil
+
+  # Parse variable(s): could be:
+  # 1. for i in arr        (single = index for range, value for array)
+  # 2. for i, v in arr     (two vars = index and value)
+  # 3. for v in arr        (single = value for array)
+  var indexVar: Node = nil
+  var valueVar: Node = nil
+
+  let firstIdent = parseIdentifier(p)
+  if firstIdent == nil:
+    echo "Error: Expected identifier after 'for'"
+    return nil
+
+  # Check for comma: i, v in arr
+  if p.current.kind == tkComma:
+    p.advance()
+    let secondIdent = parseIdentifier(p)
+    if secondIdent == nil:
+      echo "Error: Expected second identifier after comma"
+      return nil
+    indexVar = firstIdent
+    valueVar = secondIdent
+  else:
+    # Single variable - we'll decide later if it's index or value
+    valueVar = firstIdent # Assume value for now
+
+  # Expect 'in'
+  if not p.expectOrError(tkIn, "Expected 'in' in for loop"):
+    return nil
+
+  # Parse target: array or range (0..10)
+  let target = parseExpression(p)
+  if target == nil:
+    echo "Error: Expected expression after 'in'"
+    return nil
+
+  # Parse loop body
+  let body = parseBlock(p)
+  if body == nil:
+    echo "Error: Expected loop body"
+    return nil
+
+  # Determine if single variable is index (for ranges) or value (for arrays)
+  # We'll need to check target type later in codegen
+  # For now: if target is nkBinaryExpr with op "..", it's a range
+
+  return Node(
+    kind: nkForRange,
+    line: line,
+    col: col,
+    nodeKind: nkForRange,
+    rangeIndex: indexVar,
+    rangeValue: valueVar,
+    rangeTarget: target,
+    rangeBody: body,
   )
 
 # =========================== ASSIGNMENT PARSER ============================

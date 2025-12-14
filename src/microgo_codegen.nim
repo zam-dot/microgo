@@ -34,6 +34,7 @@ proc escapeString(str: string): string =
       result &= ch
 
 # =========================== FORWARD DECLARATIONS ============================
+proc generateForRange(node: Node, context: CodegenContext): string
 proc generateCall(node: Node, context: CodegenContext): string
 proc generateExpression(node: Node): string
 proc generateBlock(node: Node, context: CodegenContext): string
@@ -127,6 +128,66 @@ proc generateFor(node: Node, context: CodegenContext): string =
   for line in bodyCode.splitLines:
     if line.len > 0:
       code &= "  " & line & "\n"
+
+  code &= "}\n"
+  return indentLine(code, context)
+
+proc generateForRange(node: Node, context: CodegenContext): string =
+  echo ">>> DEBUG generateForRange: CALLED! <<<"
+  echo "DEBUG generateForRange: called! index=",
+    if node.rangeIndex == nil: "nil" else: node.rangeIndex.identName,
+    " value=",
+    if node.rangeValue == nil: "nil" else: node.rangeValue.identName
+
+  if node.rangeTarget == nil:
+    return indentLine("/* ERROR: No range target */\n", context)
+
+  # Check if target is a range (0..5)
+  var isRange = false
+  var startVal, endVal: string
+
+  if node.rangeTarget.kind == nkBinaryExpr and node.rangeTarget.op == "..":
+    isRange = true
+    startVal = generateExpression(node.rangeTarget.left)
+    endVal = generateExpression(node.rangeTarget.right)
+
+  var code = ""
+
+  if isRange:
+    # Generate: for (int i = start; i <= end; i++)
+    if node.rangeValue != nil:
+      # for i in 0..5 (value is the index in this case)
+      code =
+        "for (int " & node.rangeValue.identName & " = " & startVal & "; " &
+        node.rangeValue.identName & " <= " & endVal & "; " & node.rangeValue.identName &
+        "++) {\n"
+    elif node.rangeIndex != nil:
+      # Shouldn't happen for ranges, but handle it
+      code =
+        "for (int " & node.rangeIndex.identName & " = " & startVal & "; " &
+        node.rangeIndex.identName & " <= " & endVal & "; " & node.rangeIndex.identName &
+        "++) {\n"
+    else:
+      code = "for (int _i = " & startVal & "; _i <= " & endVal & "; _i++) {\n"
+  else:
+    # Generate array iteration
+    let target = generateExpression(node.rangeTarget)
+    code =
+      "for (int _i = 0; _i < sizeof(" & target & ") / sizeof(" & target &
+      "[0]); _i++) {\n"
+
+    if node.rangeIndex != nil:
+      code &= "  int " & node.rangeIndex.identName & " = _i;\n"
+
+    if node.rangeValue != nil:
+      code &= "  int " & node.rangeValue.identName & " = " & target & "[_i];\n"
+
+  # Generate body
+  if node.rangeBody != nil:
+    let bodyCode = generateBlock(node.rangeBody, cgFunction)
+    for line in bodyCode.splitLines:
+      if line.len > 0:
+        code &= "  " & line & "\n"
 
   code &= "}\n"
   return indentLine(code, context)
@@ -663,6 +724,8 @@ proc generateFunction(node: Node): string =
           code &= generateIf(stmt, cgFunction)
         of nkFor:
           code &= generateIf(stmt, cgFunction)
+        of nkForRange: # <-- ADD THIS!
+          code &= generateForRange(stmt, cgFunction)
         of nkSwitch:
           code &= generateSwitch(stmt, cgFunction)
         else:
@@ -795,6 +858,7 @@ proc generateProgram(node: Node): string =
 
 # =========================== MAIN DISPATCH ============================
 proc generateC*(node: Node, context: string = "global"): string =
+  echo "DEBUG generateC: node.kind = ", node.kind
   let cgContext =
     if context == "function":
       cgFunction
@@ -842,6 +906,8 @@ proc generateC*(node: Node, context: string = "global"): string =
     generateIf(node, cgContext)
   of nkFor:
     generateFor(node, cgContext)
+  of nkForRange:
+    return generateForRange(node, cgContext)
   of nkSwitch:
     generateSwitch(node, cgContext)
   of nkDefer:

@@ -29,6 +29,8 @@ type
     tkSizeTType = "size_t"
     tkDefer = "defer"
     tkAlloc = "alloc"
+    tkIn = "in"
+    tkDotDot = ".."
 
     # Literals and identifiers
     tkIdent = "identifier"
@@ -109,6 +111,7 @@ const Keywords = {
   "len": tkLen,
   "defer": tkDefer,
   "alloc": tkAlloc,
+  "in": tkIn,
 }.toTable
 
 # =========================== HELPER FUNCTIONS ============================
@@ -434,9 +437,14 @@ proc lex*(source: string): seq[Token] =
       inc(i)
       inc(col)
     of '.':
-      tokens.add(createToken(tkDot, ".", line, col))
-      inc(i)
-      inc(col)
+      if i + 1 < source.len and source[i + 1] == '.':
+        tokens.add(createToken(tkDotDot, "..", line, col))
+        inc(i, 2)
+        inc(col, 2)
+      else:
+        tokens.add(createToken(tkDot, ".", line, col))
+        inc(i)
+        inc(col)
     of ';':
       tokens.add(createToken(tkSemicolon, ";", line, col))
       inc(i)
