@@ -175,17 +175,63 @@ proc generateForRange(node: Node, context: CodegenContext): string =
     else:
       code = "for (int _i = " & startVal & "; _i <= " & endVal & "; _i++) {\n"
   else:
-    # Generate array iteration
+    # Generate array/string iteration
     let target = generateExpression(node.rangeTarget)
-    code =
-      "for (int _i = 0; _i < sizeof(" & target & ") / sizeof(" & target &
-      "[0]); _i++) {\n"
 
-    if node.rangeIndex != nil:
-      code &= "  int " & node.rangeIndex.identName & " = _i;\n"
+    # Check if target is a string
+    var isString = false
 
-    if node.rangeValue != nil:
-      code &= "  int " & node.rangeValue.identName & " = " & target & "[_i];\n"
+    # Method 1: Check if it's a string literal node
+    if node.rangeTarget.kind == nkStringLit:
+      isString = true
+    # Method 2: Check if it's an identifier with common string names
+    elif node.rangeTarget.kind == nkIdentifier:
+      let name = node.rangeTarget.identName
+      if name == "s" or name == "str" or name == "text" or name.endsWith("Str") or
+          name.endsWith("String"):
+        isString = true
+    # Method 3: Check generated expression (hacky)
+    elif target.startsWith("\"") or target.contains("char*"):
+      isString = true
+
+    if isString:
+      # String iteration: check for null terminator
+      code = "for (int _i = 0; " & target & "[_i] != '\\0'; _i++) {\n"
+
+      # Set index variable if provided (i in for i, v)
+      if node.rangeIndex != nil:
+        code &= "  int " & node.rangeIndex.identName & " = _i;\n"
+
+      # Set value variable if provided (v in for i, v) - char for strings
+      if node.rangeValue != nil:
+        code &= "  char " & node.rangeValue.identName & " = " & target & "[_i];\n"
+    else:
+      # Array iteration: use sizeof
+      code =
+        "for (int _i = 0; _i < (int)(sizeof(" & target & ") / sizeof(" & target &
+        "[0])); _i++) {\n"
+
+      # Set index variable if provided (i in for i, v)
+      if node.rangeIndex != nil:
+        code &= "  int " & node.rangeIndex.identName & " = _i;\n"
+
+      # Set value variable if provided (v in for i, v) - int for arrays
+      if node.rangeValue != nil:
+        # Try to get array element type
+        var elemType = "int" # Default
+        # Check if we can infer from array literal
+        if node.rangeTarget.kind == nkArrayLit and node.rangeTarget.elements.len > 0:
+          let firstElem = node.rangeTarget.elements[0]
+          if firstElem.kind == nkStringLit:
+            elemType = "char*"
+          elif firstElem.kind == nkLiteral:
+            if firstElem.literalValue.contains('.') or
+                firstElem.literalValue.contains('e') or
+                firstElem.literalValue.contains('E'):
+              elemType = "double"
+
+        code &=
+          "  " & elemType & " " & node.rangeValue.identName & " = " & target & "[_i];\n"
 
   # Generate body
   if node.rangeBody != nil:
@@ -284,22 +330,35 @@ proc inferTypeFromExpression(expr: Node): string =
     return "int"
 
 # Then simplify generateVarDecl:
+# In generateVarDecl, add string detection:
 proc generateVarDecl(node: Node, context: CodegenContext): string =
   if node.varValue != nil:
     if node.varValue.kind == nkCall:
       echo "  Call function: ", node.varValue.callFunc
   var typeName = node.varType
   var isArray = false
+  var isString = false
 
   # If no explicit type, infer from value
   if typeName.len == 0 and node.varValue != nil:
-    typeName = inferTypeFromExpression(node.varValue)
-
-    # Check if value is array literal
-    if node.varValue.kind == nkArrayLit:
+    if node.varValue.kind == nkStringLit:
+      typeName = "char*"
+      isString = true
+    elif node.varValue.kind == nkArrayLit:
       isArray = true
-      if typeName.endsWith("*"):
-        typeName = typeName[0 ..^ 2]
+      if node.varValue.elements.len > 0:
+        let firstElem = node.varValue.elements[0]
+        if firstElem.kind == nkStringLit:
+          typeName = "char*"
+        elif firstElem.kind == nkLiteral:
+          if firstElem.literalValue.contains('.') or firstElem.literalValue.contains(
+            'e'
+          ) or firstElem.literalValue.contains('E'):
+            typeName = "double"
+          else:
+            typeName = "int"
+    else:
+      typeName = inferTypeFromExpression(node.varValue)
 
   # Handle array types from explicit annotation
   elif typeName.endsWith("[]"):
@@ -308,6 +367,8 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
   elif typeName.contains("[") and typeName.contains("]"):
     # Already has array dimensions
     isArray = true
+  elif typeName == "char*":
+    isString = true
 
   # Build the declaration
   var code = ""
@@ -318,6 +379,8 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
     else:
       # Dynamic array
       code = typeName & "* " & node.varName & " = "
+  elif isString:
+    code = "char* " & node.varName & " = "
   else:
     code = typeName & " " & node.varName & " = "
 
@@ -325,7 +388,7 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
     code &= generateExpression(node.varValue)
   else:
     # Default initialization
-    if typeName == "char*":
+    if isString or typeName == "char*":
       code &= "NULL"
     elif typeName in ["int", "long", "short", "size_t"]:
       code &= "0"
