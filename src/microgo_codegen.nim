@@ -84,10 +84,8 @@ proc generateFor(node: Node, context: CodegenContext): string =
     code = "for ("
     if node.forInit != nil:
       case node.forInit.kind
-
       of nkVarDecl: code &= "int " & node.forInit.varName & " = " & generateExpression(node.forInit.varValue)
       of nkAssignment: code &= generateExpression(node.forInit.left) & " = " & generateExpression(node.forInit.right)
-      
       else: code &= generateExpression(node.forInit)
     code &= "; "
 
@@ -125,6 +123,7 @@ proc generateForRange(node: Node, context: CodegenContext): string =
     elif node.rangeIndex != nil: code = "for (int " & node.rangeIndex.identName & " = " & startVal & "; " &
         node.rangeIndex.identName & " <= " & endVal & "; " & node.rangeIndex.identName & "++) {\n"
     else: code = "for (int _i = " & startVal & "; _i <= " & endVal & "; _i++) {\n"
+
   else:
     let target    = generateExpression(node.rangeTarget)
     var isString  = false
@@ -216,6 +215,26 @@ proc inferTypeFromExpression(node: Node): string =
 
 # =========================== VARIABLE DECLARATION ============================
 proc generateVarDecl(node: Node, context: CodegenContext): string =
+  var cType = node.varType
+  
+  # Check if this looks like an enum type (starts with uppercase)
+  if cType.len > 0 and cType[0].isUpperAscii() and cType != "NULL":
+    # For enums, keep the type as-is
+    let valStr = if node.varValue != nil: 
+                   " = " & generateExpression(node.varValue) 
+                 else: " = 0"
+    return indentLine(cType & " " & node.varName & valStr & ";", context)
+
+  if node.varValue != nil and node.varValue.kind == nkCall:
+    if node.varValue.callFunc == "getmem":
+      cType &= "*"  # Turn 'double' into 'double*'
+  
+    let valStr = if node.varValue != nil: 
+                   " = " & generateExpression(node.varValue) 
+                 else: ""
+                 
+    return indentLine(cType & " " & node.varName & valStr & ";", context)
+
   if ',' in node.varName:
     let 
       names      = node.varName.split(',')
@@ -244,8 +263,15 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
   
   var
     typeName = node.varType
-    isArray  = false
+    isArray = false
     isString = false
+    isEnum = false  # Add this flag
+
+  # Check if this is an enum type
+  if typeName.len > 0 and typeName[0].isUpperAscii():
+    # Check if we have a corresponding enum definition
+    # For now, assume any uppercase type is an enum
+    isEnum = true
 
   if typeName.len == 0 and node.varValue != nil:
     if node.varValue.kind == nkStringLit:
@@ -270,12 +296,18 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
   elif typeName.contains("[") and typeName.contains("]"): isArray = true
   elif typeName == "char*": isString = true
 
+  if node.varValue != nil and node.varValue.kind == nkCall:
+    if node.varValue.callFunc == "getmem" or node.varValue.callFunc == "alloc":
+      if not typeName.endsWith("*"):
+        typeName &= "*"
+
   var code = ""
   if isArray:
     if node.varValue != nil and 
       node.varValue.kind == nkArrayLit: code = typeName & " " & node.varName & "[] = "
     else: code = typeName & "* " & node.varName & " = "
   elif isString: code = "char* " & node.varName & " = "
+  elif isEnum: code = typeName & " " & node.varName & " = "  # Use enum type
   else: code = typeName & " " & node.varName & " = "
 
   if node.varValue != nil: code &= generateExpression(node.varValue)
@@ -288,6 +320,17 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
 
   code &= ";\n"
   return indentLine(code, context)
+
+# =========================== ENUM GENERATORS ============================
+proc generateEnum(node: Node): string =
+  var code = "typedef enum {\n"
+  for i, value in node.enumValues:
+    code &= "    " & value
+    if i < node.enumValues.len - 1:
+      code &= ","
+    code &= "\n"
+  code &= "} " & node.enumName & ";\n\n"
+  return code
 
 # ============================ DECLARATION GENERATORS ============================
 proc generateConstDecl(node: Node, context: CodegenContext): string =
@@ -341,6 +384,17 @@ proc generateCall(node: Node, context: CodegenContext, errorVar: string = ""): s
       let arg      = generateExpression(node.callArgs[0])
       callCode     = "sizeof(" & arg & ") / sizeof(" & arg & "[0])"
     else: callCode = "0 /* len() error */"
+
+  # ADD THIS CASE:
+  of "sizeof":
+    if node.callArgs.len > 0:
+      let typeName = node.callArgs[0].identName
+      let mappedType = case typeName:
+        of "float64": "double"
+        of "int32": "int"
+        else: typeName
+      callCode = "sizeof(" & mappedType & ")"
+    else: callCode = "0"
   
   of "getmem":
     if node.callArgs.len > 0: callCode = "malloc(" & generateExpression(node.callArgs[0]) & ")"
@@ -475,6 +529,14 @@ proc generateStruct(node: Node): string =
   return code
 
 proc generateStructLiteral(node: Node): string =
+  # Check if this is actually an enum initialization
+  if node.fieldValues.len == 1:
+    let assignment = node.fieldValues[0]
+    if assignment.left.identName == "value":
+      # This is an enum initialization
+      return generateExpression(assignment.right)
+  
+  # Regular struct literal
   var 
     resultStruct = "{"
     initializers: seq[string]
@@ -525,7 +587,6 @@ proc generateBlock(node: Node, context: CodegenContext): string =
       if stmtCode.len > 0: blockResult &= stmtCode
 
   if deferStack.len > 0:
-    blockResult &= "\n  // Deferred statements\n"
     for i in countdown(deferStack.len - 1, 0):
       blockResult &= indentLine(deferStack[i], context)
 
@@ -544,6 +605,7 @@ proc generateFunction(node: Node): string =
       for i, param in node.params:
         if i > 0: code &= ", "
         code &= param.varType & " " & param.varName
+
     if node.returnsError:
       if node.params.len > 0: code &= ", "
       code &= "char** error_out"
@@ -662,6 +724,7 @@ proc generateProgram(node: Node): string =
   for funcNode in node.functions:
     case funcNode.kind
     of nkStruct:    structsCode &= generateStruct(funcNode)
+    of nkEnum:      structsCode &= generateEnum(funcNode)
     of nkConstDecl: defines &= generateConstDecl(funcNode, cgGlobal)
 
     of nkCBlock:
@@ -703,15 +766,10 @@ proc generateC*(node: Node, context: string = "global"): string =
   of nkReturn:          generateReturn(node, cgContext)
   of nkBlock:           generateBlock(node, cgContext)
   of nkCBlock:          generateCBlock(node, cgContext)
-
-  of nkVarDecl, nkInferredVarDecl: generateVarDecl(node, cgContext)
   of nkConstDecl:       generateConstDecl(node, cgContext)
-  
-  of nkBinaryExpr, nkIndexExpr, nkArrayLit: generateExpression(node)
   of nkArrayType:       generateArrayType(node)
   of nkIdentifier:      generateIdentifier(node)
-  
-  of nkLiteral, nkStringLit: generateLiteral(node)
+  of nkEnum:            return generateEnum(node)
   of nkCall:            return generateCall(node, cgExpression)
   of nkIf:              generateIf(node, cgContext)
   of nkFor:             generateFor(node, cgContext)
@@ -723,3 +781,7 @@ proc generateC*(node: Node, context: string = "global"): string =
   of nkSwitchExpr:      "/* switch_expr */"
   of nkGroup:           generateGroup(node, cgContext)
   of nkElse:            ""
+  of nkBinaryExpr, nkIndexExpr, nkArrayLit: generateExpression(node)
+  of nkVarDecl, nkInferredVarDecl:          generateVarDecl(node, cgContext)
+  of nkLiteral, nkStringLit:                generateLiteral(node)
+

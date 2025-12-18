@@ -16,6 +16,7 @@ type NodeKind* = enum
   nkLiteral
   nkStringLit
   nkReturn
+  nkEnum
   nkCall
   nkBinaryExpr =      "binary"
   nkIf =              "if"
@@ -100,6 +101,10 @@ type Node* = ref object
   of nkArrayType:
     elemType*:  string
     size*:      Node
+
+  of nkEnum:
+    enumName*: string
+    enumValues*: seq[string] 
   
   of nkSwitch:
     switchTarget*:  Node
@@ -162,6 +167,8 @@ proc parseIf(p: Parser): Node
 proc parseAssignmentStatement(p: Parser): Node
 proc parseSwitch(p: Parser): Node
 proc parseStructLiteral(p: Parser, structName: string): Node
+proc parseEnum(p: Parser): Node
+
 
 # =========================== PARSER UTILITIES ============================
 proc newParser*(tokens: seq[Token]): Parser =
@@ -511,6 +518,48 @@ proc parseStructLiteral(p: Parser, structName: string): Node =
     return Node(kind: nkStructLiteral, line: line, col: col, nodeKind: nkStructLiteral,
       structType: structName, fieldValues: fieldValues,)
 
+  # Check if this looks like enum initialization (no field names)
+  let savedPos = p.pos
+  
+  # Try to parse as enum initialization (just a value)
+  let value = parseExpression(p)
+  if value != nil:
+    # Check if next token is RBrace or comma
+    if p.current.kind == tkRBrace or p.current.kind == tkComma:
+      # This is enum-style initialization
+      p.pos = savedPos  # Reset to parse properly
+      p.current = p.tokens[savedPos]
+      
+      # Parse enum values
+      while p.current.kind != tkRBrace and p.current.kind != tkEOF:
+        let enumValue = parseExpression(p)
+        if enumValue == nil: return nil
+        
+        # Create a dummy assignment for consistency
+        let fieldAssign = Node(kind: nkAssignment, line: line, col: col,
+          nodeKind: nkAssignment, left: Node(kind: nkIdentifier, line: line, col: col,
+            nodeKind: nkIdentifier, identName: "value"), right: enumValue)
+        fieldValues.add(fieldAssign)
+        
+        if p.current.kind == tkComma: 
+          p.advance()
+        elif p.current.kind != tkRBrace: 
+          return nil
+      
+      if not p.expect(tkRBrace): return nil
+      
+      # For enums with single value, return just the value
+      if fieldValues.len == 1:
+        return fieldValues[0].right
+      else:
+        # Multiple enum values not supported
+        return nil
+    else:
+      # Not enum style, reset and parse as struct
+      p.pos = savedPos
+      p.current = p.tokens[savedPos]
+  
+  # Parse as regular struct literal with field names
   while p.current.kind != tkRBrace and p.current.kind != tkEOF:
     let fieldName = parseIdentifier(p)
     if fieldName == nil: return nil
@@ -520,7 +569,7 @@ proc parseStructLiteral(p: Parser, structName: string): Node =
     if value == nil: return nil
 
     let fieldAssign = Node(kind: nkAssignment, line: fieldName.line, col: fieldName.col,
-      nodeKind: nkAssignment, left: fieldName, right: value,)
+      nodeKind: nkAssignment, left: fieldName, right: value)
     fieldValues.add(fieldAssign)
 
     if p.current.kind == tkComma: p.advance()
@@ -530,7 +579,6 @@ proc parseStructLiteral(p: Parser, structName: string): Node =
 
   return Node(kind: nkStructLiteral, line: line, col: col, nodeKind: nkStructLiteral,
     structType: structName, fieldValues: fieldValues,)
-
 # =========================== CALL PARSER ============================
 proc parseCall(p: Parser): Node =
   let
@@ -576,41 +624,45 @@ proc parseCallExpr(p: Parser): Node =
 proc parsePrimary(p: Parser): Node =
   case p.current.kind
   of tkIdent, tkPrint, tkGetMem, tkFreeMem, tkLen, tkAlloc:
-    if p.peek(1).kind == tkLParen: return parseCallExpr(p) 
+    if p.peek(1).kind == tkLParen: 
+      return parseCallExpr(p) 
     if p.peek(1).kind == tkLBrace:
       let 
         savedPos = p.pos
         typeNameNode = parseIdentifier(p)
       if typeNameNode != nil:
         let name = typeNameNode.identName
+        # Allow both structs and enums to use struct literal syntax
         if name.len > 0 and name[0] in {'A'..'Z'} and name != "NULL":
           let structLit = parseStructLiteral(p, name)
-          if structLit != nil: return structLit
+          if structLit != nil: 
+            return structLit
       
       p.pos = savedPos
       p.current = p.tokens[savedPos]
 
+    # Just parse as identifier (could be enum value, variable name, etc.)
     let baseNode = parseIdentifier(p)
     if baseNode == nil: return nil
 
+    # Handle array indexing
     if p.current.kind == tkLBracket:
       p.advance()
       let index = parseExpression(p)
       if index == nil: return nil
       if not p.expect(tkRBracket): return nil
-
       return Node(kind: nkIndexExpr, line: baseNode.line, col: baseNode.col,
-        nodeKind: nkIndexExpr, left: baseNode, right: index,)
+        nodeKind: nkIndexExpr, left: baseNode, right: index)
 
+    # Handle field access
     var currentNode = baseNode
-
     while p.current.kind == tkDot:
       p.advance() 
       let field = parseIdentifier(p)
       if field == nil: return nil
-
       currentNode = Node(kind: nkFieldAccess, line: currentNode.line, col: currentNode.col, 
-      nodeKind: nkFieldAccess, base: currentNode,  field: field,)
+        nodeKind: nkFieldAccess, base: currentNode, field: field)
+    
     return currentNode
 
   of tkIntType, tkFloatType, tkStringType, tkBoolType, tkSizeTType:
@@ -673,6 +725,7 @@ proc parsePrimary(p: Parser): Node =
 
   of tkCBlock: return parseCBlock(p)
   else: return nil
+
 
 # =========================== STATEMENT VAR DECL ============================
 proc parseVarDecl(p: Parser): Node =
@@ -1151,6 +1204,7 @@ proc parseTopLevel(p: Parser): Node =
   of tkConst:   return parseConstDecl(p)
   of tkVar:     return parseVarDecl(p)
   of tkStruct:  return parseStruct(p)
+  of tkEnum:    return parseEnum(p)
   else: return nil
 
 # =========================== PROGRAM PARSER ============================
@@ -1218,6 +1272,44 @@ proc parseFor(p: Parser): Node =
 
     return Node(kind: nkFor, line: line, col: col, nodeKind: nkFor, forInit: nil,
       forCondition: condition, forUpdate: nil, forBody: body,)
+
+# =========================== ENUM PARSER ============================
+proc parseEnum(p: Parser): Node =
+  let
+    line = p.current.line
+    col = p.current.col
+  
+  if not p.expect(tkEnum): return nil
+  
+  let nameIdent = parseIdentifier(p)
+  if nameIdent == nil: return nil
+  
+  if not p.expectOrError(tkLBrace, "Expected '{' after enum name"): return nil
+  
+  var enumValues: seq[string] = @[]
+  
+  while p.current.kind != tkRBrace and p.current.kind != tkEOF:
+    if p.current.kind == tkIdent:
+      # Store the identifier name as a string
+      enumValues.add(p.current.lexeme)
+      p.advance()
+      
+      if p.current.kind == tkComma:
+        p.advance()
+    else:
+      # Skip unexpected tokens
+      p.advance()
+  
+  if not p.expectOrError(tkRBrace, "Expected '}' at end of enum"): return nil
+  
+  return Node(
+    kind: nkEnum,
+    line: line,
+    col: col,
+    nodeKind: nkEnum,
+    enumName: nameIdent.identName,
+    enumValues: enumValues
+  )
 
 # =========================== FOR RANGE LOOP PARSER ============================
 proc parseForRange(p: Parser): Node =
@@ -1387,6 +1479,10 @@ proc printAst*(node: Node, indent: int = 0) =
       if node.returnsError: " error" else: ""
     printAst(node.body, indent + 1)
   
+  of nkEnum:
+    echo spaces, "Enum: ", node.enumName
+    echo spaces, "  Values: ", node.enumValues.join(", ")
+
   of nkBlock:
     echo spaces, "Block:"
     for stmt in node.statements: printAst(stmt, indent + 1)

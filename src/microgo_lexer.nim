@@ -31,6 +31,7 @@ type
     tkAlloc =        "alloc"
     tkIn =           "in"
     tkDotDot =       ".."
+    tkEnum =         "enum"
 
     # Literals and identifiers
     tkIdent =       "identifier"
@@ -98,7 +99,7 @@ const Keywords = {
   "getmem":   tkGetMem,
   "freemem":  tkFreeMem,
   "free":     tkFreeMem,
-  "sizeof":   tkSizeOf,
+ # "sizeof":   tkSizeOf,
   "int":      tkIntType,
   "float":    tkFloatType,
   "string":   tkStringType,
@@ -111,6 +112,7 @@ const Keywords = {
   "nil":      tkNil,
   "len":      tkLen,
   "defer":    tkDefer,
+  "enum":     tkEnum,
   "alloc":    tkAlloc,
   "in":       tkIn,
   "NULL":     tkNil,

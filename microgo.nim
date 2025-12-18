@@ -4,10 +4,10 @@ import src/microgo_parser
 import src/microgo_codegen
 import std/[os, osproc, strutils]
 
-# ======================== RESOLVE IMPORTS ==============================
 # Forward declaration
 proc filterSelectiveImports(source: string, items: seq[string]): string
 
+# ======================== RESOLVE IMPORTS ==============================
 proc resolveImports(source: string, baseDir: string): string =
   var
     output = ""
