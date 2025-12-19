@@ -32,6 +32,8 @@ proc generateCall(node: Node, context: CodegenContext, errorVar: string = ""): s
 proc generateExpression(node: Node): string
 proc generateBlock(node: Node, context: CodegenContext): string
 proc generateFieldAccess(node: Node): string
+proc generateAddressOf(node: Node): string
+proc generateDeref(node: Node): string
 proc generateStructLiteral(node: Node): string
 proc generateIndexExpr(node: Node): string
 proc generateArrayLiteral(node: Node): string
@@ -47,6 +49,13 @@ proc generateLiteral(node: Node): string =
 
 proc generateIdentifier(node: Node): string =
   node.identName
+
+# =========================== DEREFERENCE GENERATORS ============================
+proc generateDeref(node: Node): string =
+  return "*" & generateExpression(node.operand)
+
+proc generateAddressOf(node: Node): string =
+  return "&" & generateExpression(node.operand)
 
 # =========================== EXPRESSION GENERATORS ============================
 proc generateExpression(node: Node): string =
@@ -65,6 +74,8 @@ proc generateExpression(node: Node): string =
   of nkIdentifier: result = node.identName
   of nkArrayType: result = generateArrayType(node)
   of nkLiteral, nkStringLit: result = generateLiteral(node)
+  of nkAddressOf: result = generateAddressOf(node)
+  of nkDeref: result = generateDeref(node)  # Now it's defined
   of nkGroup: result = "(" & generateExpression(node.groupExpr) & ")"
   else: result = "/* ERROR: unhandled expression */"
 
@@ -178,6 +189,17 @@ proc inferTypeFromExpression(node: Node): string =
   if node == nil: return "int"
 
   case node.kind
+  of nkAddressOf:
+    let targetType = inferTypeFromExpression(node.operand)  # Changed from .target
+    return targetType & "*"
+  of nkDeref:
+    let ptrType = inferTypeFromExpression(node.operand)  # Changed from .target
+    # Remove one level of pointer
+    if ptrType.endsWith("*"):
+      return ptrType[0..^2]
+    else:
+      return ptrType
+  # ... rest of the cases remain the same ...
   of nkLiteral:
     let val = node.literalValue
     if val == "NULL": return "void*" 
@@ -215,7 +237,45 @@ proc inferTypeFromExpression(node: Node): string =
 
 # =========================== VARIABLE DECLARATION ============================
 proc generateVarDecl(node: Node, context: CodegenContext): string =
+  echo "DEBUG generateVarDecl:"
+  echo "  varName: ", node.varName
+  echo "  varType: ", node.varType
+  echo "  hasValue: ", node.varValue != nil
+  if node.varValue != nil:
+    echo "  value kind: ", node.varValue.kind
+  
   var cType = node.varType
+  
+  # Check for array type: [size]type
+  if cType.startsWith("[") and cType.contains("]"):
+    let closeBracket = cType.find(']')
+    if closeBracket > 0:
+      let 
+        sizePart = cType[1..<closeBracket]  # Should be "3"
+        elemType = cType[closeBracket+1..^1]  # Should be "int"
+      
+      echo "  DEBUG array type:"
+      echo "    sizePart: '", sizePart, "'"
+      echo "    elemType: '", elemType, "'"
+      
+      var code = ""
+      if node.varValue != nil and node.varValue.kind == nkArrayLit:
+        # With initializer: [3]int = [1,2,3] -> int arr[3] = {1,2,3}
+        code = elemType & " " & node.varName & "[" & sizePart & "] = " & generateExpression(node.varValue)
+      else:
+        # Without initializer
+        code = elemType & " " & node.varName & "[" & sizePart & "]"
+      
+      echo "  DEBUG generated code: ", code
+      code &= ";\n"
+      return indentLine(code, context)
+  
+  # Check for enum types (uppercase first letter)
+  if cType.len > 0 and cType[0].isUpperAscii() and cType != "NULL":
+    let valStr = if node.varValue != nil: 
+                   " = " & generateExpression(node.varValue) 
+                 else: " = 0"
+    return indentLine(cType & " " & node.varName & valStr & ";", context)
   
   # Check if this looks like an enum type (starts with uppercase)
   if cType.len > 0 and cType[0].isUpperAscii() and cType != "NULL":
@@ -385,7 +445,6 @@ proc generateCall(node: Node, context: CodegenContext, errorVar: string = ""): s
       callCode     = "sizeof(" & arg & ") / sizeof(" & arg & "[0])"
     else: callCode = "0 /* len() error */"
 
-  # ADD THIS CASE:
   of "sizeof":
     if node.callArgs.len > 0:
       let typeName = node.callArgs[0].identName
@@ -407,23 +466,12 @@ proc generateCall(node: Node, context: CodegenContext, errorVar: string = ""): s
     else: callCode = "free(NULL)"
   
   of "print":
+    # Just rename 'print' to 'printf' - same arguments, same behavior
     callCode = "printf("
-    if node.callArgs.len == 0: callCode &= "\"\\n\""
-    else:
-      let firstArg = node.callArgs[0]
-      case firstArg.kind
-      of nkStringLit:
-        callCode &= generateExpression(firstArg)
-        for i in 1 ..< node.callArgs.len:
-          callCode &= ", " & generateExpression(node.callArgs[i])
-      
-      of nkLiteral:
-        if firstArg.literalValue.contains('.') or firstArg.literalValue.contains('e') or
-            firstArg.literalValue.contains('E'): callCode &= "\"%g\", " & generateExpression(firstArg)
-        else: callCode &= "\"%d\", " & generateExpression(firstArg)
-      
-      of nkIdentifier: callCode &= "\"%d\", " & generateExpression(firstArg)
-      else: callCode &= "\"%d\", " & generateExpression(firstArg)
+    if node.callArgs.len > 0:
+      for i, arg in node.callArgs:
+        if i > 0: callCode &= ", "
+        callCode &= generateExpression(arg)
     callCode &= ")"
   
   else:
@@ -524,7 +572,10 @@ proc generateIf(node: Node, context: CodegenContext): string =
 proc generateStruct(node: Node): string =
   var code = "typedef struct {\n"
 
-  for field in node.fields: code &= "  " & field.varType & " " & field.varName & ";\n"
+  # Change node.fields to node.structFields
+  for field in node.structFields: 
+    code &= "  " & field.varType & " " & field.varName & ";\n"
+  
   code &= "} " & node.structName & ";\n\n"
   return code
 
@@ -773,6 +824,8 @@ proc generateC*(node: Node, context: string = "global"): string =
   of nkCall:            return generateCall(node, cgExpression)
   of nkIf:              generateIf(node, cgContext)
   of nkFor:             generateFor(node, cgContext)
+  of nkAddressOf:       return generateAddressOf(node)  # Add this
+  of nkDeref:           return generateDeref(node)      # Add this
   of nkForRange:        return generateForRange(node, cgContext)
   of nkSwitch:          generateSwitch(node, cgContext)
   of nkDefer:           return generateDefer(node, cgContext)
@@ -781,6 +834,8 @@ proc generateC*(node: Node, context: string = "global"): string =
   of nkSwitchExpr:      "/* switch_expr */"
   of nkGroup:           generateGroup(node, cgContext)
   of nkElse:            ""
+  of nkPtrType:         "/* ptr_type */"    # Add handler
+  of nkRefType:         "/* ref_type */"    # Add handler
   of nkBinaryExpr, nkIndexExpr, nkArrayLit: generateExpression(node)
   of nkVarDecl, nkInferredVarDecl:          generateVarDecl(node, cgContext)
   of nkLiteral, nkStringLit:                generateLiteral(node)

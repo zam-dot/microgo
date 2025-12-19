@@ -50,6 +50,7 @@ type
     tkPlus =        "+"
     tkMinus =       "-"
     tkStar =        "*"
+    tkAmpersand =   "&"
     tkModulus =     "%"
     tkSlash =       "/"
     tkEq =          "=="
@@ -61,7 +62,6 @@ type
     tkColonAssign = ":="
     tkAnd =         "&&"
     tkOr =          "||"
-    tkAmpersand =   "&"
 
     # Brackets
     tkLParen =      "("
@@ -417,7 +417,8 @@ proc lex*(source: string): seq[Token] =
         inc(i, 2)
         inc(col, 2)
       else:
-        tokens.add(createToken(tkAmpersand, "&", line, col))
+        # CHANGE THIS LINE:
+        tokens.add(createToken(tkAmpersand, "&", line, col))  # Was tkError!
         inc(i)
         inc(col)
     of '|':

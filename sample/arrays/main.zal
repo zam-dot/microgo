@@ -1,12 +1,13 @@
 @c {
     #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
 }
 
 func main() {
-    arr := [1, 2, 3, 4, 5]
-    for i, v in arr {
-        if v > 2 && v < 5 {  // Using new && operator
-            printf("Value %d at index %d\n", v, i)
-        }
+    //arr := [1, 2, 3, 4, 5]
+    arr := [1, 2, 33, 4, 5]
+    for i in 0..(len(arr) - 1) {
+           print("Value %d \n",arr[i])
     }
 }
