@@ -61,6 +61,7 @@ type
     tkColonAssign = ":="
     tkAnd =         "&&"
     tkOr =          "||"
+    tkAmpersand =   "&"
 
     # Brackets
     tkLParen =      "("
@@ -416,7 +417,7 @@ proc lex*(source: string): seq[Token] =
         inc(i, 2)
         inc(col, 2)
       else:
-        tokens.add(createToken(tkError, "Unexpected character: &", line, col))
+        tokens.add(createToken(tkAmpersand, "&", line, col))
         inc(i)
         inc(col)
     of '|':

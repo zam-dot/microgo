@@ -168,6 +168,7 @@ proc parseAssignmentStatement(p: Parser): Node
 proc parseSwitch(p: Parser): Node
 proc parseStructLiteral(p: Parser, structName: string): Node
 proc parseEnum(p: Parser): Node
+proc parseTypeWithConst(p: Parser): string
 
 
 # =========================== PARSER UTILITIES ============================
@@ -361,52 +362,36 @@ proc parseDefer(p: Parser): Node =
 
 # =========================== TYPE PARSER ============================
 proc parseType(p: Parser): string =
-
   if p.current.kind == tkStar:
     p.advance()
-    let baseType = parseType(p)
+    let baseType = parseType(p)  # Recursive!
     return baseType & "*"
-
-  elif p.current.kind == tkLBracket:
+  
+  # Handle base types
+  case p.current.kind
+  of tkIntType:
     p.advance()
-    let sizeNode = parseExpression(p)
-    var sizeStr = ""
-    if sizeNode != nil:
-      case sizeNode.kind
-      of nkLiteral: sizeStr = sizeNode.literalValue
-      else: sizeStr = "0"
-
-    if not p.expect(tkRBracket): return ""
-
-    let elemType = parseType(p) 
-    return "[" & sizeStr & "]" & elemType 
-
+    return "int"
+  of tkFloatType:
+    p.advance()
+    return "double"
+  of tkStringType:
+    p.advance()
+    return "char*"
+  of tkBoolType:
+    p.advance()
+    return "bool"
+  of tkSizeTType:
+    p.advance()
+    return "size_t"
+  of tkIdent:
+    let ident = parseIdentifier(p)
+    if ident != nil:
+      return ident.identName
+    else:
+      return ""
   else:
-    case p.current.kind
-    of tkIntType:
-      p.advance()
-      return "int"
-
-    of tkFloatType:
-      p.advance()
-      return "double"
-
-    of tkStringType:
-      p.advance()
-      return "char*"
-
-    of tkBoolType:
-      p.advance()
-      return "bool"
-
-    of tkSizeTType:
-      p.advance()
-      return "size_t"
-
-    of tkIdent:
-      let ident = parseIdentifier(p)
-      return ident.identName 
-    else: return ""
+    return ""
 
 # =========================== ARRAY LITERAL PARSER ============================
 proc parseArrayLiteral(p: Parser): Node =
@@ -462,34 +447,9 @@ proc parseStruct(p: Parser): Node =
 
     if not p.expectOrError(tkColon, "Expected ':' after field names"): return nil
 
-    var fieldType = ""
-    case p.current.kind
-
-    of tkIntType:
-      fieldType =     "int"
-      p.advance()
-    
-    of tkFloatType:
-      fieldType =     "double"
-      p.advance()
-    
-    of tkStringType:
-      fieldType =     "char*"
-      p.advance()
-    
-    of tkBoolType:
-      fieldType =     "bool"
-      p.advance()
-    
-    of tkSizeTType:
-      fieldType =     "size_t"
-      p.advance()
-    
-    of tkIdent:
-      let typeIdent = parseIdentifier(p)
-      if typeIdent != nil:
-        fieldType = typeIdent.identName
-    else:
+    # USE parseType INSTEAD OF MANUAL TYPE PARSING
+    let fieldType = parseType(p)  # <-- This replaces all the case statement!
+    if fieldType.len == 0: 
       return nil
 
     for fieldName in fieldNames:
@@ -645,24 +605,23 @@ proc parsePrimary(p: Parser): Node =
     let baseNode = parseIdentifier(p)
     if baseNode == nil: return nil
 
+    var currentNode = baseNode
+    while p.current.kind == tkDot:
+      p.advance()
+      let field = parseIdentifier(p)
+      if field == nil: return nil
+      currentNode = Node(kind: nkFieldAccess, line: currentNode.line, col: currentNode.col,
+        nodeKind: nkFieldAccess, base: currentNode, field: field)
+
     # Handle array indexing
     if p.current.kind == tkLBracket:
       p.advance()
       let index = parseExpression(p)
       if index == nil: return nil
       if not p.expect(tkRBracket): return nil
-      return Node(kind: nkIndexExpr, line: baseNode.line, col: baseNode.col,
-        nodeKind: nkIndexExpr, left: baseNode, right: index)
-
-    # Handle field access
-    var currentNode = baseNode
-    while p.current.kind == tkDot:
-      p.advance() 
-      let field = parseIdentifier(p)
-      if field == nil: return nil
-      currentNode = Node(kind: nkFieldAccess, line: currentNode.line, col: currentNode.col, 
-        nodeKind: nkFieldAccess, base: currentNode, field: field)
-    
+      return Node(kind: nkIndexExpr, line: currentNode.line, col: currentNode.col,
+        nodeKind: nkIndexExpr, left: currentNode, right: index)
+  
     return currentNode
 
   of tkIntType, tkFloatType, tkStringType, tkBoolType, tkSizeTType:
@@ -996,33 +955,8 @@ proc parseFunction(p: Parser): Node =
 
     if not p.expectOrError(tkColon, "Expected ':' after parameter name"): return nil
 
-    var paramType =     "int"
-    case p.current.kind
-    of tkIntType:
-      paramType =       "int"
-      p.advance()
-
-    of tkFloatType:
-      paramType =       "double"
-      p.advance()
-    
-    of tkStringType:
-      paramType =       "char*"
-      p.advance()
-    
-    of tkBoolType:
-      paramType =       "bool"
-      p.advance()
-    
-    of tkSizeTType:
-      paramType =       "size_t"
-      p.advance()
-    
-    of tkIdent:
-      let typeIdent = parseIdentifier(p)
-      if typeIdent != nil: paramType = typeIdent.identName
-    else:
-      return nil
+    let paramType = parseTypeWithConst(p)
+    if paramType.len == 0: return nil
 
     let paramNode = Node(kind: nkVarDecl, line: paramName.line, col: paramName.col,
       nodeKind: nkVarDecl, varName: paramName.identName, varType: paramType, varValue: nil, )
@@ -1035,33 +969,8 @@ proc parseFunction(p: Parser): Node =
       if nextParamName == nil: return nil
       if not p.expectOrError(tkColon, "Expected ':' after parameter name"): return nil
 
-      var nextParamType =   "int"
-      case p.current.kind
-      of tkIntType:
-        nextParamType =     "int"
-        p.advance()
-        
-      of tkFloatType:
-        nextParamType =     "double"
-        p.advance()
-      
-      of tkStringType:
-        nextParamType =     "char*"
-        p.advance()
-      
-      of tkBoolType:
-        nextParamType =     "bool"
-        p.advance()
-      
-      of tkSizeTType:
-        nextParamType =     "size_t"
-        p.advance()
-      
-      of tkIdent:
-        let typeIdent = parseIdentifier(p)
-        if typeIdent != nil: nextParamType = typeIdent.identName
-      else:
-        return nil
+      let nextParamType = parseTypeWithConst(p)
+      if nextParamType.len == 0: return nil
 
       let nextParamNode = Node(kind: nkVarDecl, line: nextParamName.line,
         col: nextParamName.col, nodeKind: nkVarDecl, varName: nextParamName.identName,
@@ -1170,6 +1079,48 @@ proc parseFunction(p: Parser): Node =
   return Node(kind: nkFunction, line: line, col: col, nodeKind: nkFunction,
     funcName: ident.identName, params: params, body: body, returnType: returnType,
     returnsError: returnsError,)
+
+# =========================== TYPE PARSER WITH CONST ============================
+proc parseTypeWithConst(p: Parser): string =
+  var isConst = false
+  
+  # Check for const keyword
+  if p.current.kind == tkConst:
+    isConst = true
+    p.advance()
+  
+  # Parse the actual type
+  var baseType = ""
+  case p.current.kind
+  of tkIntType:
+    baseType = "int"
+    p.advance()
+  of tkFloatType:
+    baseType = "double"
+    p.advance()
+  of tkStringType:
+    baseType = "char*"
+    p.advance()
+  of tkBoolType:
+    baseType = "bool"
+    p.advance()
+  of tkSizeTType:
+    baseType = "size_t"
+    p.advance()
+  of tkIdent:
+    let typeIdent = parseIdentifier(p)
+    if typeIdent != nil: 
+      baseType = typeIdent.identName
+    else:
+      return ""  # Error: invalid type identifier
+  else:
+    return ""  # Error: expected a type
+  
+  # Add const prefix if needed
+  if isConst:
+    return "const " & baseType
+  else:
+    return baseType
 
 # =========================== PACKAGE PARSER ============================
 proc parseReturn(p: Parser): Node =

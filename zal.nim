@@ -235,17 +235,17 @@ proc compileFile(filename: string, runImmediately: bool = true): bool =
     cCode = compileToC(source, filename)
 
   var baseName = filename
-  if filename.endsWith(".mg"): baseName = filename[0 ..^ 4]
+  if filename.endsWith(".zal"): baseName = filename[0 ..^ 4]
 
   var justFilename = extractFilename(baseName)
-  if justFilename.endsWith(".mg"): justFilename = justFilename[0 ..^ 4]
+  if justFilename.endsWith(".zal"): justFilename = justFilename[0 ..^ 4]
 
   let
-    cFilename = justFilename & ".c"
+    cFilename = justFilename & "zal.c"
     formattedCCode = formatCode(cCode, cFilename)
 
   writeFile(cFilename, formattedCCode)
-  echo "Generated ", cFilename
+#  echo "Generated ", cFilename
 
   if runImmediately:
     if compileAndRun(cFilename): return true
@@ -257,20 +257,16 @@ proc showUsage() =
   echo """
 Zal Compiler
 Usage: 
-  zal <file.zal>           # Compile and run immediately
-  zal run <file.zal>       # Same as above
-  zal build <file.zal>     # Compile to C only
-  zal init [name]         # Create new project
+  zal <file.zal>           # Compile and run immediately (with tcc)
+  zal init [name]          # Create new project
   
 Options:
-  -h, --help                  Show this help message
+  -h, --help               # Show this help message
 
 Examples:
-  zal main.zal            # Compile and run
-  zal run main.zal        # Same as above
-  zal build main.zal      # Generate hello.c only
-  zal init myproject      # Create new project
-  zal init                # Create 'myproject' folder
+  zal main.zal             # Fast compile & run with tcc
+  zal init myproject       # Create new project
+  zal init                 # Create 'myproject' folder
 """
 
 # =========================== RUN FILE ===================================
@@ -300,7 +296,7 @@ proc initProject(projectName: string = "") =
 
   # Create main.mg
   let mainContent =
-    """// @include ../lib/lib.mg
+    """// @include ../lib/lib.zal
 @c {
     #include <stdio.h>
 }
@@ -309,7 +305,7 @@ func main() {
     print("Hello from Zal!\n")
 }
 """
-  writeFile(projectDir / "src" / "main.mg", mainContent)
+  writeFile(projectDir / "src" / "main.zal", mainContent)
 
   let makefileContent =
     """# Zal Project Makefile
@@ -319,32 +315,43 @@ SRC_DIR = src
 OUTPUT_DIR = output
 BIN_DIR = bin
 
-# Compiler
-MGC = zal
+# Compilers
+ZAL = zal
+TCC = tcc
+GCC = gcc
 
 # Build rules
-all: build run
+all: fast
 
+# ULTRA FAST development cycle: zal -> tcc run
+fast: $(SRC_DIR)/main.zal
+	@$(ZAL) build $(SRC_DIR)/main.zal
+	@$(TCC) -run main.zal.c
+	@rm -f main.zal.c  # Clean up
+
+# Traditional gcc build (optimized)
 build: $(OUTPUT_DIR)/main.c
-	@echo "Compiling C code..."
-	gcc -O2 $(OUTPUT_DIR)/main.c -o $(BIN_DIR)/$(PROJECT)
+	@echo "🔨 Building with gcc..."
+	$(GCC) -O2 $(OUTPUT_DIR)/main.zal.c -o $(BIN_DIR)/$(PROJECT)
 
-$(OUTPUT_DIR)/main.c: $(SRC_DIR)/main.mg
-	@echo "Compiling Zal to C..."
-	$(MGC) build $(SRC_DIR)/main.mg
-	@mv src/main.c $(OUTPUT_DIR)/ 2>/dev/null || mv main.c $(OUTPUT_DIR)/
+$(OUTPUT_DIR)/main.c: $(SRC_DIR)/main.zal
+	$(ZAL) build $(SRC_DIR)/main.zal
+	@mkdir -p $(OUTPUT_DIR)
+	@mv src/main.zal.c $(OUTPUT_DIR)/ 2>/dev/null || mv main.zal.c $(OUTPUT_DIR)/
 
 run: build
-	@echo "Running $(PROJECT)..."
-	./$(BIN_DIR)/$(PROJECT)
+	@./$(BIN_DIR)/$(PROJECT)
 
 clean:
-	rm -f $(OUTPUT_DIR)/*.c $(BIN_DIR)/*
+	rm -f $(OUTPUT_DIR)/*.c $(BIN_DIR)/* *.c  # Clean everything
 
-.PHONY: all build run clean
+# Aliases
+dev: fast
+prod: build
+
+.PHONY: all build run clean fast dev prod
 """
   writeFile(projectDir / "Makefile", makefileContent)
-
 # ============================= MAIN ======================================
 proc main() =
   if paramCount() == 0:
@@ -360,13 +367,13 @@ proc main() =
 
   of "run":
     if paramCount() < 2:
-      echo "Usage: zal run <file.mg>"
+      echo "Usage: zal run <file.zal>"
       quit(1)
     if not runFile(paramStr(2)): quit(1)
 
   of "build":
     if paramCount() < 2:
-      echo "Usage: zal build <file.mg>"
+      echo "Usage: zal build <file.zal>"
       quit(1)
     if not buildFile(paramStr(2)): quit(1)
 
