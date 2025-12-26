@@ -1,0 +1,1 @@
+"Strings and Arrays are RC, but Collections (Lists/Maps) are Arenas."

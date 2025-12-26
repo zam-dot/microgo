@@ -1,89 +1,12 @@
+
 #include <stdio.h>
-#ifndef ARENA_H
-#define ARENA_H
+#ifndef ZAL_ARENA_H
+#define ZAL_ARENA_H
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
-
-typedef struct {
-    uint8_t *buffer;
-    size_t   offset;
-    size_t   capacity;
-} Arena;
-
-
-// The "Magic" Bump Allocator
-static inline void *arena_alloc(Arena *a, size_t size) {
-    // 1. Alignment (8-byte alignment for 64-bit systems)
-    size_t aligned_size = (size + 7) & ~7;
-
-    // 2. Bounds check (No 50MB crash, just a clean check)
-    if (a->offset + aligned_size <= a->capacity) {
-        void *ptr = &a->buffer[a->offset];
-        a->offset += aligned_size;
-        return ptr;
-    }
-    return NULL; // Out of memory
-}
-
-// The "Nuke" - Reclaims everything in 0.000s
-static inline void arena_reset(Arena *a) { a->offset = 0; }
-
-// Arena-allocated array creation
-static inline void *arena_alloc_array(Arena *a, size_t elem_size, size_t count) {
-    size_t total_size = elem_size * count;
-    void  *ptr = arena_alloc(a, total_size);
-    if (ptr) {
-        memset(ptr, 0, total_size);
-    }
-    return ptr;
-}
-
-// Arena-allocated string
-static inline char *arena_string_new(Arena *a, const char *str) {
-    if (!str) return NULL;
-    size_t len = strlen(str);
-    char  *result = (char *)arena_alloc(a, len + 1);
-    if (result) {
-        strcpy(result, str);
-    }
-    return result;
-}
-
-static inline Arena arena_init_dynamic(size_t capacity) {
-    uint8_t *buffer = (uint8_t *)calloc(1, capacity);
-    if (!buffer) {
-        fprintf(stderr, "ERROR: Failed to allocate %zu bytes for arena\n", capacity);
-        exit(1);
-    }
-    return (Arena){.buffer = buffer, .offset = 0, .capacity = capacity};
-}
-
-static inline void arena_free(Arena *a) {
-    if (a->buffer) {
-        free(a->buffer);
-        a->buffer = NULL;
-    }
-    a->capacity = 0;
-    a->offset = 0;
-}
-
-// Keep the existing arena_init for static buffers
-static inline Arena arena_init(void *backing_buffer, size_t capacity) {
-    return (Arena){.buffer = (uint8_t *)backing_buffer, .offset = 0, .capacity = capacity};
-}
-
-#endif
-
-
-// Global arena for @arena allocations
-static Arena global_arena;
-
-#ifndef ZAL_ARENA_H
-#define ZAL_ARENA_H
 
 typedef struct {
     size_t refcount;
@@ -192,67 +115,16 @@ static inline void rc_weak_release(void *ptr) {
 #endif
 
 
-#define PI 3.14159
-typedef struct {
-    int id;
-    int age;
-} Person;
-
-typedef struct {
-    Person person;
-    double salary;
-    char  *department;
-} Employee;
-
-typedef enum { RED, GREEN } Colors;
-
 int main() {
-    // Initialize arena
-    global_arena = arena_init_dynamic(262144);
-    char *str = rc_string_new("hello world");
-    printf("%s\n", str);
-    int *arr = rc_new_array(int, 5);
-    arr[0] = 1;
-    arr[1] = 2;
-    arr[2] = 3;
-    arr[3] = 4;
-    arr[4] = 5;
-    for (int _i = 0; _i < RC_GET_HEADER(arr)->array_count; _i++) {
-        int i = arr[_i];
-        printf("%d\n", i);
-    }
-    printf("%d\n", GREEN);
-    const int MAX_SIZE = 100;
-    printf("%d\n", MAX_SIZE);
-    Employee tei = {
-        .person = {.id = 1001, .age = 30}, .salary = 75000.0, .department = "Engineering"};
-    printf("Employee %d:\n", tei.person.id);
-    printf("Age: %d\n", tei.person.age);
-    printf("Salary: $%.2f\n", tei.salary);
-    printf("Dept: %s\n", tei.department);
-    int *xx = (int *)arena_alloc_array(&global_arena, sizeof(int), 5);
-    xx[0] = 10;
-    xx[1] = 20;
-    xx[2] = 30;
-    xx[3] = 40;
-    xx[4] = 50;
-    for (int i = 0; i <= 4; i++) {
-        printf("%d\n", i);
-    }
-    int i = 100;
-    switch (i) {
-        case 0:
-        case 2:
-        case 4:
-        case 5:  printf("7 is even\n"); break;
-        case 1:  printf("7 is odd\n"); break;
-        default: printf("shit\n"); break;
+    double *weights = rc_new_array(double, 3);
+    weights[0] = 1.32;
+    weights[1] = 4.12;
+    weights[2] = 3.42;
+    for (int i = 0; i <= 2; i++) {
+        printf("%.2f\n", weights[i]);
     }
 
     // Block scope cleanup
-    if (str) rc_release(str);
-    if (arr) rc_release(arr);
-    // Clean up arena
-    arena_free(&global_arena);
+    if (weights) rc_release(weights);
     return 0;
 }

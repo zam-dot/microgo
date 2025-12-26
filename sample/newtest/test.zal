@@ -1,0 +1,15 @@
+@c { #include <stdio.h> }
+
+func test_loop() {
+    for i in 1..1000 {
+        msg := "test"
+        if i > 500 {
+            print("%s\n", msg)
+            @c {if (msg) rc_release(msg);}
+            return // or break
+        }
+    }
+}
+func main() {
+    test_loop()
+}

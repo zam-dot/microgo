@@ -64,9 +64,12 @@ func main() {
     print("Salary: $%.2f\n", tei.salary)
     print("Dept: %s\n",      tei.department)
 
-    loop()
+    @arena xx = [10, 20, 30, 40, 50]
+    for i in 0..4 {
+        print("%d\n", i)
+    }
 
-    i := 5
+    i := 100
 
     switch (i) {
         case 0, 2, 4, 5: print("7 is even\n")

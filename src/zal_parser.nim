@@ -47,6 +47,9 @@ type NodeKind* = enum
   nkRcInit =          "rc_init"
   nkWeakRef =         "weak_ref"
   nkStrongRef =       "strong_ref"
+  nkArena =           "arena"
+  nkArenaAlloc =      "arena_alloc"
+  nkArenaArrayLit =   "arena_array_literal"
 
 # ================================= AST NODE ==================================
 type Node* = ref object
@@ -82,7 +85,7 @@ type Node* = ref object
     right*:   Node
     op*:      string
   
-  of nkVarDecl:
+  of nkVarDecl, nkArena:
     varName*:   string
     varType*:   string
     varValue*:  Node
@@ -107,7 +110,7 @@ type Node* = ref object
     structType*:  string
     fieldValues*: seq[Node]
   
-  of nkArrayLit: elements*: seq[Node]
+  of nkArrayLit, nkArenaArrayLit: elements*: seq[Node]
   
   of nkArrayType:
     elemType*:  string
@@ -146,7 +149,7 @@ type Node* = ref object
     rangeIndex*:    Node 
     rangeValue*:    Node 
     rangeTarget*:   Node 
-    rangeBody*:     Node 
+    rangeBody*:     Node
   
   of nkDefer: deferExpr*: Node
   
@@ -159,7 +162,11 @@ type Node* = ref object
   
   of nkWeakRef, nkStrongRef:
     refTarget*:     Node
-  
+
+  of nkArenaAlloc:
+    arenaType*:     string
+    arenaArgs*:     seq[Node]
+
   else: discard
 
 # =========================== PARSER STATE ============================
@@ -275,6 +282,98 @@ proc parseInferredVarDecl(p: Parser): Node =
   
   return Node(kind: nkVarDecl, line: line, col: col, nodeKind: nkVarDecl,
     varName: varName, varType: varType, varValue: value)
+  
+
+# =========================== ARENA DECL PARSER ============================
+proc parseArenaDecl(p: Parser): Node =
+  let
+    line = p.current.line
+    col = p.current.col
+    tokenStr = p.current.lexeme
+  
+  var arenaSizeBytes = 262144  # Default 256KB in bytes
+  
+  # Extract size from @arena(size) if present
+  if tokenStr.startsWith("@arena(") and tokenStr.endsWith(")"):
+    let sizeWithSuffix = tokenStr[7..^2]  # Remove "@arena(" and ")"
+    
+    if sizeWithSuffix.len > 0:
+      # Parse size with suffix support
+      var multiplier = 1
+      var numericPart = sizeWithSuffix
+      
+      # Check for suffixes (case-insensitive)
+      let sizeLower = sizeWithSuffix.toLowerAscii()
+      
+      if sizeLower.endsWith("kb"):
+        multiplier = 1024
+        numericPart = sizeWithSuffix[0..^3]
+      elif sizeLower.endsWith("mb"):
+        multiplier = 1024 * 1024
+        numericPart = sizeWithSuffix[0..^3]
+      elif sizeLower.endsWith("gb"):
+        multiplier = 1024 * 1024 * 1024
+        numericPart = sizeWithSuffix[0..^3]
+      elif sizeLower.endsWith("b"):
+        multiplier = 1
+        numericPart = sizeWithSuffix[0..^2]
+      # Also support K, M, G without B
+      elif sizeLower.endsWith("k"):
+        multiplier = 1024
+        numericPart = sizeWithSuffix[0..^2]
+      elif sizeLower.endsWith("m"):
+        multiplier = 1024 * 1024
+        numericPart = sizeWithSuffix[0..^2]
+      elif sizeLower.endsWith("g"):
+        multiplier = 1024 * 1024 * 1024
+        numericPart = sizeWithSuffix[0..^2]
+      
+      try:
+        let number = parseInt(numericPart.strip())
+        arenaSizeBytes = number * multiplier
+      except:
+        echo "WARNING: Invalid arena size: '", sizeWithSuffix, "', using default"
+        arenaSizeBytes = 262144
+  
+  
+  p.advance()  # Skip @arena or @arena(size)
+  
+  if p.current.kind == tkIdent:
+    # Parse identifier ONCE
+    let identNode = parseIdentifier(p)
+    if identNode == nil: 
+      return nil
+    
+    # Expect '=' 
+    if p.current.kind != tkAssign:
+      return nil
+    
+    p.advance()  # Skip '='
+    
+    # Parse the value ONCE
+    let valueNode = parseExpression(p)
+    if valueNode == nil:
+      return nil
+    
+    # Check if it's an array literal
+    if valueNode.kind == nkArrayLit:
+      # Convert to arena array literal
+      let arenaArrayNode = Node(kind: nkArenaArrayLit, nodeKind: nkArenaArrayLit,
+                              line: valueNode.line, col: valueNode.col,
+                              elements: valueNode.elements)
+      
+      # Create var declaration node with arena size in varType
+      return Node(kind: nkVarDecl, line: line, col: col, nodeKind: nkVarDecl,
+                  varName: identNode.identName,  # <-- Use identNode here
+                  varType: "arena:" & $arenaSizeBytes,
+                  varValue: arenaArrayNode)  # <-- Use arenaArrayNode, not value
+    else:
+      return Node(kind: nkVarDecl, line: line, col: col, nodeKind: nkVarDecl,
+                  varName: identNode.identName,
+                  varType: "arena:" & $arenaSizeBytes,
+                  varValue: valueNode)  # <-- Use original valueNode
+    
+  return nil
 
 # =========================== LITERAL PARSER ============================
 proc parseLiteral(p: Parser): Node =
@@ -919,20 +1018,22 @@ proc parseVarDeclNoSemi(p: Parser): Node =
 
 # =========================== STATEMENT PARSERS ============================
 proc parseStatement(p: Parser): Node =
-  
   case p.current.kind
-  of tkIdent:
-    if p.peek(1).kind == tkColonAssign: return parseInferredVarDecl(p)
-    if p.peek(1).kind == tkComma and p.peek(2).kind == tkIdent and p.peek(3).kind == tkColonAssign:
-      return parseInferredVarDecl(p)
+
+  of tkFor:
+    let savedPos = p.pos
+    let forRangeResult = parseForRange(p)
     
-    var assignment = parseAssignmentStatement(p)
-    if assignment != nil: return assignment
-    
-    let call = parseCallStatement(p)
-    if call != nil: return call
-    else: return nil
-  
+    if forRangeResult != nil: 
+      return forRangeResult
+    else:
+      p.pos = savedPos
+      p.current = p.tokens[savedPos]
+      return parseFor(p)
+
+  of tkIf:     return parseIf(p)
+  of tkConst:  return parseConstDecl(p)
+
   of tkPrint:
     let callNode = parseCall(p)
     if callNode != nil and p.current.kind == tkSemicolon: p.advance()
@@ -952,26 +1053,53 @@ proc parseStatement(p: Parser): Node =
       p.current = p.tokens[savedPos]
       return parseVarDecl(p)
 
-  of tkConst:  return parseConstDecl(p)
   of tkCBlock: return parseCBlock(p)
-  of tkIf:     return parseIf(p)
 
-  of tkFor:
-    let 
-      savedPos = p.pos
-      forRangeResult = parseForRange(p)
-    
-    if forRangeResult != nil: 
-      return forRangeResult
-    else:
-      p.pos = savedPos
-      p.current = p.tokens[savedPos]
-      return parseFor(p)
+  of tkArena:
+    return parseArenaDecl(p)  # <-- Make sure it's calling parseArenaDecl
 
   of tkReturn: return parseReturn(p)
   of tkSwitch: return parseSwitch(p)
   of tkDefer:  return parseDefer(p)
-  else:        return nil
+  of tkIdent:
+    if p.peek(1).kind == tkColonAssign: return parseInferredVarDecl(p)
+    if p.peek(1).kind == tkComma and p.peek(2).kind == tkIdent and p.peek(3).kind == tkColonAssign:
+      return parseInferredVarDecl(p)
+    
+    var assignment = parseAssignmentStatement(p)
+    if assignment != nil: return assignment
+    
+    let call = parseCallStatement(p)
+    if call != nil: return call
+    else: return nil
+
+  else: return nil
+
+# =========================== ARENA DECLARATION PARSER ============================
+proc parseArenaDeclaration(p: Parser): Node {.used.} =
+  # let line = p.current.line
+  # let col = p.current.col
+
+  p.advance()
+
+  let name = parseIdentifier(p)
+  if name == nil: return nil
+
+  if not p.expect(tkAssign): return nil
+
+  let sizeExpr = parseExpression(p)
+  if sizeExpr == nil: return nil
+
+  var sizeStr = "65536"
+  if sizeExpr.kind == nkLiteral:
+    sizeStr = sizeExpr.literalValue
+
+  echo "NOTE: arena name = size syntax not implemented yet"
+  return nil
+  # return Node(kind: nkArenaDecl, nodeKind: nkArenaDecl,
+  #             line: line, col: col,
+  #             varName: name.identName, varType: "Arena",
+  #             varValue: Node(kind: nkLiteral, literalValue: sizeStr))
 
 # =========================== BLOCK AND FUNCTION PARSERS ============================
 proc parseBlock(p: Parser): Node =
@@ -1173,6 +1301,8 @@ proc parseReturn(p: Parser): Node =
 # =========================== TOP-LEVEL PARSERS ============================
 proc parseTopLevel(p: Parser): Node =
   case p.current.kind
+  of tkArena:
+    return parseArenaDecl(p)
   of tkFunc:
     let    funcNode = parseFunction(p)
     return funcNode

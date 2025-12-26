@@ -32,6 +32,7 @@ type
     tkIn =           "in"
     tkDotDot =       ".."
     tkEnum =         "enum"
+    tkArena =        "@arena"
 
     # Reference counting
     tkRc =           "rc"
@@ -128,6 +129,7 @@ const Keywords = {
   "release":  tkRcRelease,
   "weak":     tkWeak,
   "strong":   tkStrong,
+  "@arena":   tkArena,
 }.toTable
 
 # =========================== HELPER FUNCTIONS ============================
@@ -335,10 +337,47 @@ proc lex*(source: string): seq[Token] =
     of '0' .. '9': tokens.add(scanNumber(source, i, line, col))
     of '"': tokens.add(scanString(source, i, line, col))
     of '@':
-      if i + 1 < source.len and source[i + 1] == 'c': tokens.add(scanCBlock(source, i, line, col))
+      if i + 1 < source.len:
+        case source[i + 1]
+        of 'c': 
+          tokens.add(scanCBlock(source, i, line, col))
+        of 'a':
+          # Check if it's @arena or @arena(size)
+          if i + 5 < source.len and source[i+1..i+5] == "arena":
+            # Look for '('
+            var arenaLength = 6  # "@arena"
+            var j = i + 6
+
+            while j < source.len and source[j] in {' ', '\t', '\n', '\r'}:
+              inc(j)
+            
+            if j < source.len and source[j] == '(':
+              # Parse until closing paren
+              var parenDepth = 1
+              var k = j + 1
+              while k < source.len and parenDepth > 0:
+                if source[k] == '(':
+                  inc(parenDepth)
+                elif source[k] == ')':
+                  dec(parenDepth)
+                inc(k)
+              if parenDepth == 0:
+                arenaLength = (k - i)  # Up to and including closing paren
+            
+            let lexeme = source[i..<i+arenaLength]
+            tokens.add(createToken(tkArena, lexeme, line, col))
+            inc(i, arenaLength)
+            inc(col, arenaLength)
+          else:
+            tokens.add(createToken(tkError, "Unexpected character after @", line, col))
+            inc(i)
+            inc(col)
+        else:
+          tokens.add(createToken(tkError, "Unexpected character after @", line, col))
+          inc(i)
+          inc(col)
       else:
-        tokens.add(createToken(tkError, "Unexpected character after @: " & 
-        (if i + 1 < source.len: $source[i + 1] else: "EOF"), line, col, ))
+        tokens.add(createToken(tkError, "Unexpected character after @", line, col))
         inc(i)
         inc(col)
     of '=':

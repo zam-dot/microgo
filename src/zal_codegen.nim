@@ -4,15 +4,20 @@ import std/[strutils, tables]
 
 # =========================== CONTEXT TYPES ============================
 type CodegenContext* = enum
-  cgGlobal # Top-level (functions, global variables)
-  cgFunction # Inside a function body
-  cgExpression # Inside an expression
+  cgGlobal
+  cgFunction
+  cgExpression
+  cgArena 
 
 # =========================== REFERENCE COUNTING IMPLEMENTATION ============================
 const RC_HEADER {.used.} = r"""
+#ifndef ZAL_ARENA_H
+#define ZAL_ARENA_H
+
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 typedef struct {
     size_t refcount;
@@ -32,7 +37,7 @@ static inline void rc_weak_retain(void *ptr) {
 }
 
 static inline void* rc_alloc(size_t size) {
-    RCHeader* header = (RCHeader*)malloc(RC_HEADER_SIZE + size);
+    RCHeader* header = (RCHeader*)calloc(1, RC_HEADER_SIZE + size);
     if (header) {
         header->refcount = 1;
         header->weak_count = 0;
@@ -42,7 +47,7 @@ static inline void* rc_alloc(size_t size) {
 }
 
 static inline void* rc_alloc_array(size_t elem_size, size_t count) {
-    RCHeader* header = (RCHeader*)malloc(RC_HEADER_SIZE + (elem_size * count));
+    RCHeader* header = (RCHeader*)calloc(1, sizeof(RCHeader) + (elem_size * count));
     if (header) {
         header->refcount = 1;
         header->weak_count = 0;
@@ -80,6 +85,26 @@ static inline void rc_retain(void* ptr) {
     }
 }
 
+static inline void rc_release_array(void *ptr, void (*destructor)(void*)) {
+    if (!ptr) return;
+    RCHeader *header = RC_GET_HEADER(ptr);
+    
+    // If this is the last reference, clean up elements
+    if (--header->refcount == 0) {
+        if (destructor) {
+            void **array = (void **)ptr;
+            for (size_t i = 0; i < header->array_count; i++) {
+                destructor(array[i]);
+            }
+        }
+
+        // Only free if no weak refs remain
+        if (header->weak_count == 0) {
+            free(header);
+        }
+    }
+}
+
 static inline void rc_weak_release(void *ptr) {
     if (!ptr) return;
     RCHeader *header = RC_GET_HEADER(ptr);
@@ -90,9 +115,92 @@ static inline void rc_weak_release(void *ptr) {
         }
     }
 }
+
+#endif
 """
 
-var rcVariables = initTable[string, bool]()
+# In zal_codegen.nim, add this constant (or rename your existing one):
+const ARENA_HEADER {.used.} = r"""
+#ifndef ARENA_H
+#define ARENA_H
+
+typedef struct {
+    uint8_t *buffer;
+    size_t   offset;
+    size_t   capacity;
+} Arena;
+
+
+// The "Magic" Bump Allocator
+static inline void *arena_alloc(Arena *a, size_t size) {
+    // 1. Alignment (8-byte alignment for 64-bit systems)
+    size_t aligned_size = (size + 7) & ~7;
+
+    // 2. Bounds check (No 50MB crash, just a clean check)
+    if (a->offset + aligned_size <= a->capacity) {
+        void *ptr = &a->buffer[a->offset];
+        a->offset += aligned_size;
+        return ptr;
+    }
+    return NULL; // Out of memory
+}
+
+// The "Nuke" - Reclaims everything in 0.000s
+static inline void arena_reset(Arena *a) { a->offset = 0; }
+
+// Arena-allocated array creation
+static inline void* arena_alloc_array(Arena *a, size_t elem_size, size_t count) {
+    size_t total_size = elem_size * count;
+    void *ptr = arena_alloc(a, total_size);
+    if (ptr) {
+        memset(ptr, 0, total_size);
+    }
+    return ptr;
+}
+
+// Arena-allocated string
+static inline char* arena_string_new(Arena *a, const char* str) {
+    if (!str) return NULL;
+    size_t len = strlen(str);
+    char *result = (char*)arena_alloc(a, len + 1);
+    if (result) {
+        strcpy(result, str);
+    }
+    return result;
+}
+
+static inline Arena arena_init_dynamic(size_t capacity) {
+    uint8_t *buffer = (uint8_t *)calloc(1, capacity);
+    if (!buffer) {
+        fprintf(stderr, "ERROR: Failed to allocate %zu bytes for arena\n", capacity);
+        exit(1);
+    }
+    return (Arena){.buffer = buffer, .offset = 0, .capacity = capacity};
+}
+
+static inline void arena_free(Arena *a) {
+    if (a->buffer) {
+        free(a->buffer);
+        a->buffer = NULL;
+    }
+    a->capacity = 0;
+    a->offset = 0;
+}
+
+// Keep the existing arena_init for static buffers
+static inline Arena arena_init(void *backing_buffer, size_t capacity) {
+    return (Arena){.buffer = (uint8_t *)backing_buffer, .offset = 0, .capacity = capacity};
+}
+
+#endif
+"""
+
+var 
+  rcVariables = initTable[string, bool]()
+  arenaVariables = initTable[string, bool]()
+#  arenaDeclarations = initTable[string, string]()
+  maxArenaSize = 262144  # Default 256KB
+
 
 # =========================== HELPER FUNCTIONS ============================
 proc indentLine(code: string, context: CodegenContext): string =
@@ -126,7 +234,7 @@ proc generateIndexExpr(node: Node): string
 proc generateArrayLiteral(node: Node): string
 proc generateArrayType(node: Node): string
 proc getCleanupString(vars: seq[tuple[name: string, typeName: string, isArray: bool]]): string
-# Reference counting forward declarations:
+# reference counting forward declarations:
 proc generateRcNew(node: Node, context: CodegenContext): string
 proc generateRcRetain(node: Node, context: CodegenContext): string
 proc generateRcRelease(node: Node, context: CodegenContext): string
@@ -332,7 +440,7 @@ proc generateExpression(node: Node): string =
   of nkCall: result = generateCall(node, cgExpression)
   of nkStructLiteral: result = generateStructLiteral(node)
   of nkIndexExpr: result = generateIndexExpr(node)
-  of nkArrayLit: result = generateArrayLiteral(node)
+  of nkArrayLit, nkArenaArrayLit: result = generateArrayLiteral(node)  # Handle both here!
   of nkBinaryExpr: result =
       generateExpression(node.left) & " " & node.op & " " &
       generateExpression(node.right)
@@ -386,19 +494,20 @@ proc generateFor(node: Node, context: CodegenContext): string {.used.} =
   return indentLine(code, context)
 
 # =========================== RANGE GENERATORS ============================
-proc generateForRange(node: Node, context: CodegenContext): string {.used.} =
+proc generateForRange(node: Node, context: CodegenContext): string =
   if node.rangeTarget == nil:
     return indentLine("/* ERROR: No range target */\n", context)
 
   var
     isRange = false
     startVal, endVal: string
+    code = ""
+
   if node.rangeTarget.kind == nkBinaryExpr and node.rangeTarget.op == "..":
     isRange = true
     if node.rangeTarget.left != nil:  startVal = generateExpression(node.rangeTarget.left)
     if node.rangeTarget.right != nil: endVal = generateExpression(node.rangeTarget.right)
-  var code = ""
-
+  
   if isRange:
     if node.rangeValue != nil: 
       code = "for (int " & node.rangeValue.identName & " = " & startVal & "; " &
@@ -406,7 +515,9 @@ proc generateForRange(node: Node, context: CodegenContext): string {.used.} =
     elif node.rangeIndex != nil: 
       code = "for (int " & node.rangeIndex.identName & " = " & startVal & "; " &
           node.rangeIndex.identName & " <= " & endVal & "; " & node.rangeIndex.identName & "++) {\n"
-    else: code = "for (int _i = " & startVal & "; _i <= " & endVal & "; _i++) {\n"
+    else: 
+      # Auto-create index variable
+      code = "for (int _i = " & startVal & "; _i <= " & endVal & "; _i++) {\n"
   else:
     let target = generateExpression(node.rangeTarget)
     var isString = false
@@ -425,7 +536,25 @@ proc generateForRange(node: Node, context: CodegenContext): string {.used.} =
       if node.rangeIndex != nil: code &= "  int " & node.rangeIndex.identName & " = _i;\n"
       if node.rangeValue != nil: code &= "  char " & node.rangeValue.identName & " = " & target & "[_i];\n"
     else:
-      code = "for (int _i = 0; _i < RC_GET_HEADER(" & target & ")->array_count; _i++) {\n"
+      # Check if this is an arena array
+      var isArenaArray = false
+      
+      if node.rangeTarget.kind == nkIdentifier:
+        let varName = node.rangeTarget.identName
+        if arenaVariables.hasKey(varName):
+          isArenaArray = true
+          # TODO: We need to track array sizes for arena arrays
+          # For now, we can't get the size of arena array variables
+          stderr.writeLine("WARNING: Can't get size of arena array '", varName, "' in for loop")
+      
+      if isArenaArray:
+        # Arena array - we don't know the size for variables
+        # Could store size when allocating, or document this limitation
+        code = "for (int _i = 0; _i < /* UNKNOWN: arena array size - using RC_GET_HEADER as fallback */ RC_GET_HEADER(" & target & ")->array_count; _i++) {\n"
+      else:
+        # Regular RC array
+        code = "for (int _i = 0; _i < RC_GET_HEADER(" & target & ")->array_count; _i++) {\n"
+      
       if node.rangeIndex != nil: code &= "  int " & node.rangeIndex.identName & " = _i;\n"
       if node.rangeValue != nil:
         var elemType = "int" 
@@ -445,6 +574,7 @@ proc generateForRange(node: Node, context: CodegenContext): string {.used.} =
 
   code &= "}\n"
   return indentLine(code, context)
+
 
 # =========================== STATEMENT GENERATORS ============================
 proc generateCBlock(node: Node, context: CodegenContext): string {.used.} =
@@ -572,6 +702,69 @@ proc inferTypeFromExpression(node: Node): string =
 
 # =========================== VARIABLE DECLARATION ============================
 proc generateVarDecl(node: Node, context: CodegenContext): string =
+  # ==================== ARENA ARRAYS ====================
+  if node.varValue != nil and node.varValue.kind == nkArenaArrayLit:
+    # Check if global scope (arena arrays can't be global)
+    if context == cgGlobal:
+      echo "ERROR: @arena arrays must be inside a function, not at global scope"
+      echo "  at line ", node.line, ":", node.col
+      return indentLine("// ERROR: @arena arrays cannot be global\n", context)
+    
+    let arrayNode = node.varValue
+    var elemType = "int"
+    
+    if arrayNode.elements.len > 0:
+      let firstElem = arrayNode.elements[0]
+      case firstElem.kind
+      of nkStringLit:
+        elemType = "char*"
+      of nkLiteral:
+        if firstElem.literalValue.contains('.') or  # Fixed: "or" not "o#"
+           firstElem.literalValue.contains('e') or 
+           firstElem.literalValue.contains('E'):
+          elemType = "double"
+        else: 
+          elemType = "int"
+      else: 
+        elemType = "int"
+    
+    # ========== ADD THIS SECTION FOR ARENA SIZE PARSING ==========
+    # Check for custom arena size in varType
+    var customArenaSize = 0
+    if node.varType.startsWith("arena:"):
+      let sizeStr = node.varType[6..^1]
+      try:
+        let sizeNum = parseInt(sizeStr)
+        if sizeNum > maxArenaSize:
+          echo "WARNING: Arena size ", sizeNum, " exceeds buffer size ", maxArenaSize
+          echo "  Consider increasing default arena size or using smaller @arena()"
+      except:
+        discard
+    
+    # Generate allocation using global_arena
+    var code = elemType & "* " & node.varName & " = (" & elemType & "*)arena_alloc_array(&global_arena, sizeof(" & elemType & "), " & $arrayNode.elements.len & ");\n"
+    
+    # Initialize elements
+    for i, elem in arrayNode.elements:
+      case elem.kind
+      of nkStringLit:
+        code &= indentLine(node.varName & "[" & $i & "] = arena_string_new(&global_arena, \"" & 
+                      escapeString(elem.literalValue) & "\");\n", context)
+      else:
+        code &= indentLine(node.varName & "[" & $i & "] = " & 
+                      generateExpression(elem) & ";\n", context)
+    
+    # Mark as arena variable
+    arenaVariables[node.varName] = true
+    
+    # Add comment about arena size if custom
+    if customArenaSize > 0:
+      code = "// Arena size: " & $customArenaSize & " bytes\n" & code
+    
+    return indentLine(code, context)
+  
+  # ==================== BASIC VARIABLE HANDLING (NON-ARENA) ====================
+  # ... rest of your existing function ...
   let shouldBeRC = isReferenceCountedType(node.varType) or
                    (node.varValue != nil and 
                     isReferenceCountedType(inferTypeFromExpression(node.varValue)))
@@ -938,30 +1131,65 @@ proc generateIndexExpr(node: Node): string =
 
 # ============================ ARRAY GENERATORS =============================
 proc generateArrayLiteral(node: Node): string =
+  
+  let isArenaArray = (node.kind == nkArenaArrayLit)
+  
   if node.elements.len == 0: 
-    return "rc_new_array(int, 0)"
+    if isArenaArray:
+      let elemType = "int"  # Default type for empty array
+      return "(" & elemType & "*)arena_alloc_array(&global_arena, sizeof(" & elemType & "), 0)"
+    else:
+      return "rc_new_array(int, 0)"
   
   var elemType = "int"
   if node.elements.len > 0:
     let firstElem = node.elements[0]
-    if firstElem.kind == nkStringLit:
+    case firstElem.kind
+    of nkStringLit:
       elemType = "char*"
-    elif firstElem.kind == nkLiteral and (firstElem.literalValue.contains('.') or firstElem.literalValue.contains('e')):
-      elemType = "double"
-  
-  var code = "({\n"
-  code &= "    " & elemType & "* _tmp = rc_new_array(" & elemType & ", " & $node.elements.len & ");\n"
-  
-  for i, elem in node.elements:
-    if elem.kind == nkStringLit:
-      code &= "    _tmp[" & $i & "] = rc_string_new(\"" & escapeString(elem.literalValue) & "\");\n"
+    elif firstElem.kind == nkLiteral:
+      if firstElem.literalValue.contains('.') or 
+         firstElem.literalValue.contains('e') or 
+         firstElem.literalValue.contains('E'):
+        elemType = "double"
+      else:
+        elemType = "int"
     else:
-      let val = generateExpression(elem)
-      code &= "    _tmp[" & $i & "] = " & val & ";\n"
+      elemType = "int"
   
-  code &= "    _tmp;\n"
-  code &= "})"
-  return code
+  if isArenaArray:
+    var code = "({\n"
+    code &= "    " & elemType & "* _tmp = (" & elemType & "*)arena_alloc_array(&global_arena, sizeof(" & 
+            elemType & "), " & $node.elements.len & ");\n"
+    
+    if node.elements.len > 0:
+      code &= "    if (_tmp) {\n"
+      for i, elem in node.elements:
+        if elem.kind == nkStringLit:
+          code &= "        _tmp[" & $i & "] = arena_string_new(&global_arena, \"" & 
+                  escapeString(elem.literalValue) & "\");\n"
+        else:
+          let val = generateExpression(elem)
+          code &= "        _tmp[" & $i & "] = " & val & ";\n"
+      code &= "    }\n"
+    
+    code &= "    _tmp;\n"
+    code &= "})"
+    return code
+  else:
+    var code = "({\n"
+    code &= "    " & elemType & "* _tmp = rc_new_array(" & elemType & ", " & $node.elements.len & ");\n"
+    
+    for i, elem in node.elements:
+      if elem.kind == nkStringLit:
+        code &= "    _tmp[" & $i & "] = rc_string_new(\"" & escapeString(elem.literalValue) & "\");\n"
+      else:
+        let val = generateExpression(elem)
+        code &= "    _tmp[" & $i & "] = " & val & ";\n"
+    
+    code &= "    _tmp;\n"
+    code &= "})"
+    return code
 
 # ============================== IF GENERATORS ================================
 proc generateIf(node: Node, context: CodegenContext): string =
@@ -1098,8 +1326,6 @@ proc generateSwitch(node: Node, context: CodegenContext): string =
           if line.len > 0: 
             code &= "    " & line & "\n"
         code &= "    break;\n"
-     # else:
-      #  code &= "    // fallthrough\n"
   
   if node.defaultCase != nil:
     code &= "  default:\n"
@@ -1118,29 +1344,30 @@ proc generateDefer(node: Node, context: CodegenContext): string =
   return generateExpression(node.deferExpr) & ";"
 
 # =========================== STRUCTURE GENERATORS ============================
-proc generateFunction(node: Node): string =
+proc generateFunction(node: Node, hasArenaArrays: bool = false): string =
   var code = ""
   
   if node.funcName == "main": 
     code = "int main() {\n"
-  else:
-    var paramsCode = ""
-    if node.params.len > 0:
-      for i, param in node.params:
-        if i > 0: paramsCode &= ", "
-        paramsCode &= param.varType & " " & param.varName
-    else:
-      paramsCode = "void"
-    code = node.returnType & " " & node.funcName & "(" & paramsCode & ") {\n"
-
-  if node.body != nil:
-    let bodyCode = generateBlock(node.body, cgFunction)
-    code &= bodyCode
-
-  if node.funcName == "main" and not code.contains("return 0;"):
-    code &= "    return 0;\n"
-  
-  code &= "}\n"
+    if hasArenaArrays:
+      # INITIALIZE at START
+      code &= "  // Initialize arena\n"
+      code &= "  global_arena = arena_init_dynamic(" & $maxArenaSize & ");\n"
+    
+    # FUNCTION BODY (allocations, loops, etc.)
+    if node.body != nil:
+      let bodyCode = generateBlock(node.body, cgFunction)
+      code &= bodyCode
+    
+    if hasArenaArrays:
+      # CLEANUP at END (after all allocations are used)
+      code &= "  // Clean up arena\n"
+      code &= "  arena_free(&global_arena);\n"
+    
+    if not code.contains("return 0;"):
+      code &= "  return 0;\n"
+    
+    code &= "}\n"
   return code
 
 # =========================== CASE GENERATOR ============================
@@ -1163,51 +1390,112 @@ proc generateDefault(node: Node, context: CodegenContext): string {.used.} =
   return code
 
 # ============================= PROGRAM GENERATOR ==============================
+proc checkNodeForArena(n: Node): bool =
+  case n.kind
+  of nkArenaArrayLit: return true
+  of nkVarDecl:
+    if n.varValue != nil and n.varValue.kind == nkArenaArrayLit: return true
+    else: return false
+  of nkBlock:
+    for stmt in n.statements:
+      if checkNodeForArena(stmt): 
+        return true
+    return false
+  of nkFunction:
+    if n.body != nil: return checkNodeForArena(n.body)
+    else: return false
+  of nkIf:
+    if n.ifThen != nil and checkNodeForArena(n.ifThen): return true
+    if n.ifElse != nil and checkNodeForArena(n.ifElse): return true
+    return false
+  of nkFor:
+    if n.forBody != nil: return checkNodeForArena(n.forBody)
+    else: return false
+  of nkForRange:
+    if n.rangeBody != nil: return checkNodeForArena(n.rangeBody)
+    else: return false
+  else: return false
+
+# ============================= PROGRAM GENERATOR ==============================
 proc generateProgram(node: Node): string =
   var
     functionCode =    ""
     hasCMain =        false
     haZalMain =       false
-    userIncludes =    ""
-    userCode =        ""
+    userIncludes =    ""  # <-- For #include statements from @c blocks
+    userCode =        ""  # <-- For other C code from @c blocks
     defines =         ""
     otherTopLevel =   ""
     structsCode =     ""
+    hasArenaArrays =  false 
 
+  # Check if we need arena support
+  for funcNode in node.functions:
+    if checkNodeForArena(funcNode):
+      hasArenaArrays = true
+      break
+
+  # Generate code
   for funcNode in node.functions:
     case funcNode.kind
     of nkStruct:    structsCode &= generateStruct(funcNode)
     of nkEnum:      structsCode &= generateEnum(funcNode)
     of nkConstDecl: defines &= generateConstDecl(funcNode, cgGlobal)
-
     of nkCBlock:
-      let   cCode = generateCBlock(funcNode, cgGlobal)
-      if    cCode.strip().startsWith("#include"):
-        userIncludes &= cCode
+      let cCode = generateCBlock(funcNode, cgGlobal)
+      
+      # Check if it's an include or other C code
+      let cleanCode = cCode.strip()
+      if cleanCode.startsWith("#include") or 
+         "#include <" in cCode or 
+         "#include \"" in cCode:
+        userIncludes &= cCode  # Includes go to top
       else:
-        userCode &= cCode 
+        userCode &= cCode      # Other C code
+      
       if "int main()" in cCode: hasCMain = true
-
     of nkFunction:
-      functionCode &= generateFunction(funcNode)
+      functionCode &= generateFunction(funcNode, hasArenaArrays)
       if funcNode.funcName == "main": haZalMain = true
-    
     of nkVarDecl: otherTopLevel &= generateVarDecl(funcNode, cgGlobal)
     of nkRcNew, nkRcRetain, nkRcRelease, nkWeakRef, nkStrongRef:
       userCode &= generateCBlock(funcNode, cgGlobal) & "\n"
     else: discard
   
-  result = userIncludes 
-  result &= RC_HEADER & "\n\n"
-  result &= userCode 
-  result &= defines & structsCode & otherTopLevel & functionCode
+  # ========== BUILD THE FINAL C CODE ==========
   
+  # 1. Start with user includes (MUST BE FIRST!)
+  result = userIncludes 
+  
+  # 2. Add RC header
+  result &= RC_HEADER & "\n\n"
+
+  # 3. Add arena header if needed
+  if hasArenaArrays:
+    result &= ARENA_HEADER & "\n\n"
+    result &= "// Global arena for @arena allocations\n"
+    result &= "static Arena global_arena;\n\n"
+  
+  # 4. Add other user C code
+  result &= userCode 
+  
+  # 5. Add defines, structs, other top-level declarations
+  result &= defines & structsCode & otherTopLevel
+  
+  # 6. Add generated function code
+  result &= functionCode
+  
+  # 7. Generate main() if not provided by user
   if not hasCMain and not haZalMain:
     result &= "\nint main() {\n"
     result &= "  // Auto-generated entry point\n"
+    if hasArenaArrays:
+      result &= "  // Initialize arena\n"
+      result &= "  global_arena = arena_init_dynamic(" & $maxArenaSize & ");\n"
     result &= "  return 0;\n"
     result &= "}\n"
-
+  
+  return result
 # =========================== MAIN DISPATCH ============================
 proc generateC*(node: Node, context: string = "global"): string =
   let cgContext =
@@ -1254,6 +1542,12 @@ proc generateC*(node: Node, context: string = "global"): string =
   of nkStrongRef:       return generateStrongRef(node, cgContext)
   of nkRcInit:          return generateRcInit(node, cgContext)
   
+  # Arena nodes - ADD THESE
+  of nkArena:           return "/* arena declaration - not implemented */"
+  of nkArenaAlloc:      return "/* arena allocation - not implemented */"
+  of nkArenaArrayLit:   return generateArrayLiteral(node)
+  
+  # These already call generateExpression which handles nkArenaArrayLit
   of nkBinaryExpr, nkIndexExpr, nkArrayLit: return generateExpression(node)
   of nkVarDecl, nkInferredVarDecl: return generateVarDecl(node, cgContext)
   of nkLiteral, nkStringLit: return generateLiteral(node)
