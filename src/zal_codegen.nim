@@ -549,6 +549,9 @@ proc generateCBlock(node: Node, context: CodegenContext): string {.used.} =
 
 # =========================== TYPE INFERENCE ============================
 proc inferTypeFromIdentifier(name: string): string =
+  if name == "argc": return "int"
+  if name == "argv": return "char**"
+
   if name.endsWith("Ptr"):
     let 
       baseName = name[0..^4]
@@ -1297,23 +1300,63 @@ proc generateFunction(node: Node, hasArenaArrays: bool = false): string =
   var code = ""
   
   if node.funcName == "main": 
-    code = "int main() {\n"
+    if node.params.len > 0:
+      var paramList: seq[string] = @[]
+      for param in node.params:
+        var cType = param.varType
+        if cType == "string": cType = "char*"
+        paramList.add(cType & " " & param.varName)
+      
+      if paramList.len == 2 and 
+         paramList[0] == "int argc" and 
+         (paramList[1] == "char** argv" or paramList[1] == "char*[] argv"):
+        code = "int main(int argc, char** argv) {\n"
+      else:
+        code = "int main(" & paramList.join(", ") & ") {\n"
+    else:
+      code = "int main() {\n"
+    
     if hasArenaArrays:
-#      code &= "  // Initialize arena\n"
-      code &= "  global_arena = arena_init_dynamic(" & $actualArenaSize & ");\n"
+      code &= "  // Initialize arena\n"
+      code &= "  global_arena = arena_init_dynamic(" & $maxArenaSize & ");\n"
     
     if node.body != nil:
       let bodyCode = generateBlock(node.body, cgFunction)
       code &= bodyCode
     
     if hasArenaArrays:
-#      code &= "  // Clean up arena\n"
+      code &= "  // Clean up arena\n"
       code &= "  arena_free(&global_arena);\n"
     
     if not code.contains("return 0;"):
       code &= "  return 0;\n"
     
     code &= "}\n"
+  else:
+    var paramList: seq[string] = @[]
+    for param in node.params:
+      var cType = param.varType
+      if cType == "string": cType = "char*"
+      paramList.add(cType & " " & param.varName)
+    
+    var returnType = node.returnType
+    if returnType == "string": returnType = "char*"
+    if returnType == "void" and node.returnsError: returnType = "int"
+    
+    code = returnType & " " & node.funcName & "(" & paramList.join(", ") & ") {\n"
+    
+    if node.returnsError:
+      code &= "  char** error_out = NULL;\n"
+    
+    if node.body != nil:
+      let bodyCode = generateBlock(node.body, cgFunction)
+      code &= bodyCode
+    
+    if returnType == "void" and not code.contains("return"):
+      code &= "}\n"
+    else:
+      code &= "}\n"
+  
   return code
 
 # =========================== CASE GENERATOR ============================

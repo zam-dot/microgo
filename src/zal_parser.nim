@@ -506,9 +506,11 @@ proc parseType(p: Parser): string =
   while p.current.kind == tkStar:
     p.advance()
     isPointer = true
+    typeStr &= "*"
   
   if isPointer: 
-    typeStr &= "*"
+    if not typeStr.endsWith("*"):
+      typeStr &= "*"
   
   return typeStr
 
