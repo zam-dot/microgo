@@ -107,7 +107,9 @@ typedef struct {
     size_t   capacity;
 } Arena;
 static inline void *arena_alloc(Arena *a, size_t size) {
-    size_t aligned_size = (size + 7) & ~7;
+    if (size == 0) return NULL; // Don't allocate 0 bytes
+
+    size_t aligned_size = (size + 7) & ~7; // Align to 8 bytes
     if (a->offset + aligned_size <= a->capacity) {
         void *ptr = &a->buffer[a->offset];
         a->offset += aligned_size;
@@ -158,15 +160,20 @@ static inline Arena arena_init(void *backing_buffer, size_t capacity) {
 static Arena global_arena;
 
 int main() {
+    // Initialize arena
     global_arena = arena_init_dynamic(262144);
-    char **x = (char **)arena_alloc_array(&global_arena, sizeof(char *), 2);
-    x[0] = arena_string_new(&global_arena, "Hello");
-    x[1] = arena_string_new(&global_arena, "world");
-    printf("x[0] = %s, x[1] = %s\n", x[0], x[1]);
-    x[0] = "Goodbye";
-    x[2] = "Something";
-    printf("x[0] = %s, x[1] = %s\n", x[0], x[1]);
-    printf("x[2] = %s\n", x[2]);
+    int *a = (int *)arena_alloc_array(&global_arena, sizeof(int), 1);
+    a[0] = 0;
+    int *b = (int *)arena_alloc_array(&global_arena, sizeof(int), 2);
+    b[0] = 0;
+    b[1] = 0;
+    printf("a = %p\n", a);
+    printf("b = %p\n", b);
+    a[0] = 999;
+    printf("a[0] = %d, b[0] = %d\n", a[0], b[0]);
+    b[0] = 111;
+    printf("a[0] = %d, b[0] = %d\n", a[0], b[0]);
+    // Clean up arena
     arena_free(&global_arena);
     return 0;
 }

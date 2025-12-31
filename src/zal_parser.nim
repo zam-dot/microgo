@@ -231,7 +231,7 @@ proc expect*(p: Parser, kind: TokenKind): bool =
 proc expectOrError*(p: Parser, kind: TokenKind, message: string): bool =
   if p.expect(kind): return true
   else:
-    echo "Error: ", message, " at line ", p.current.line, ":", p.current.col
+ #   echo "Error: ", message, " at line ", p.current.line, ":", p.current.col
     return false
 
 # =========================== BASIC NODE PARSERS ============================

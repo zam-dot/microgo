@@ -111,7 +111,9 @@ typedef struct {
     size_t   capacity;
 } Arena;
 static inline void *arena_alloc(Arena *a, size_t size) {
-    size_t aligned_size = (size + 7) & ~7;
+    if (size == 0) return NULL;  // Don't allocate 0 bytes
+    
+    size_t aligned_size = (size + 7) & ~7;  // Align to 8 bytes
     if (a->offset + aligned_size <= a->capacity) {
         void *ptr = &a->buffer[a->offset];
         a->offset += aligned_size;
@@ -698,11 +700,11 @@ proc generateVarDecl(node: Node, context: CodegenContext): string =
       except: discard
 
     var elemCount = arrayNode.elements.len
-    if elemCount == 0:
-        elemCount = 1  # Prevent zero-sized arena allocations
-        
+    # DON'T do this: if elemCount == 0: elemCount = 1
+    
     var code = elemType & "* " & node.varName & " = (" & elemType & "*)arena_alloc_array(&global_arena, sizeof(" & elemType & "), " & $elemCount & ");\n"
     
+    # Only initialize if there are elements
     for i, elem in arrayNode.elements:
       case elem.kind
       of nkStringLit:
@@ -1318,7 +1320,7 @@ proc generateFunction(node: Node, hasArenaArrays: bool = false): string =
     
     if hasArenaArrays:
       code &= "  // Initialize arena\n"
-      code &= "  global_arena = arena_init_dynamic(" & $maxArenaSize & ");\n"
+      code &= "  global_arena = arena_init_dynamic(" & $actualArenaSize & ");\n"
     
     if node.body != nil:
       let bodyCode = generateBlock(node.body, cgFunction)
@@ -1406,7 +1408,11 @@ proc checkNodeForArena(n: Node): bool =
   else: return false
 
 # ============================= SCAN FOR ARENA SIZES ==============================
+# Add a helper function to scan for arena sizes
 proc scanForArenaSizes(node: Node): int =
+  if node == nil:
+    return 0
+  
   case node.kind
   of nkProgram:
     for funcNode in node.functions:
@@ -1414,9 +1420,7 @@ proc scanForArenaSizes(node: Node): int =
       if size > result: result = size
       
   of nkFunction:
-    if node.body != nil:
-      let size = scanForArenaSizes(node.body)
-      if size > result: result = size
+    result = scanForArenaSizes(node.body)
       
   of nkBlock:
     for stmt in node.statements:
@@ -1433,30 +1437,34 @@ proc scanForArenaSizes(node: Node): int =
         discard
         
   of nkIf:
-    if node.ifThen != nil:
-      let size = scanForArenaSizes(node.ifThen)
-      if size > result: result = size
-    if node.ifElse != nil:
-      let size = scanForArenaSizes(node.ifElse)
-      if size > result: result = size
+    let thenSize = scanForArenaSizes(node.ifThen)
+    if thenSize > result: result = thenSize
+    
+    let elseSize = scanForArenaSizes(node.ifElse)
+    if elseSize > result: result = elseSize
       
   of nkFor:
-    if node.forBody != nil:
-      let size = scanForArenaSizes(node.forBody)
-      if size > result: result = size
+    let bodySize = scanForArenaSizes(node.forBody)
+    if bodySize > result: result = bodySize
       
   of nkForRange:
-    if node.rangeBody != nil:
-      let size = scanForArenaSizes(node.rangeBody)
-      if size > result: result = size
+    let bodySize = scanForArenaSizes(node.rangeBody)
+    if bodySize > result: result = bodySize
       
-  else: result = 0
+  else:
+    # For other node types, return 0
+    result = 0
+
 # ============================= PROGRAM GENERATOR ==============================
 proc generateProgram(node: Node): string =
+  # Reset state for this compilation
   rcVariables.clear()
   arenaVariables.clear()
+  
+  # SCAN FIRST: Find the maximum arena size in the entire program
   actualArenaSize = scanForArenaSizes(node)
   
+  # If no arena size found, use default
   if actualArenaSize == 0:
     actualArenaSize = maxArenaSize
   
@@ -1471,6 +1479,7 @@ proc generateProgram(node: Node): string =
     structsCode =     ""
     hasArenaArrays =  false 
 
+  # Check if we need arena support
   for funcNode in node.functions:
     if checkNodeForArena(funcNode):
       hasArenaArrays = true
@@ -1515,8 +1524,7 @@ proc generateProgram(node: Node): string =
     result &= "\nint main() {\n"
     result &= "  // Auto-generated entry point\n"
     if hasArenaArrays:
-#      result &= "  // Initialize arena\n"
-      result &= "  global_arena = arena_init_dynamic(" & $maxArenaSize & ");\n"
+      result &= "  global_arena = arena_init_dynamic(" & $actualArenaSize & ");\n"
     result &= "  return 0;\n"
     result &= "}\n"
   
